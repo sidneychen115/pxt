@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
 import { LayoutDashboard, TrendingUp, Bell, BarChart2, Activity } from 'lucide-react'
 
@@ -9,7 +10,7 @@ const nav = [
   { to: '/system', icon: Activity, label: 'System' },
 ]
 
-export default function Layout({ children }: { children: React.ReactNode }) {
+export default function Layout({ children }: { children: ReactNode }) {
   return (
     <div className="flex h-screen bg-gray-950 text-gray-100">
       <nav className="w-56 bg-gray-900 border-r border-gray-800 flex flex-col p-4 gap-1">
