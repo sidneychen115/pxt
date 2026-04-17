@@ -6,7 +6,6 @@ from sqlalchemy import select
 from src.core.config import settings
 from src.core.database import async_session_factory
 from src.core.models import Strategy
-from src.data.providers.base import DataProvider
 from src.data.providers.yfinance_provider import YFinanceProvider
 from src.data import repository
 
@@ -19,11 +18,6 @@ BACKFILL_DAYS: dict[str, int] = {
 }
 
 
-def _select_provider(timeframe: str, days_back: int) -> DataProvider:
-    """Route to cheapest free source that covers the requested history."""
-    return YFinanceProvider()
-
-
 class DataCollector:
     def __init__(self):
         self._yfinance = YFinanceProvider()
@@ -32,7 +26,7 @@ class DataCollector:
         """Scan active strategies and return {symbol: {timeframes}} merged plan."""
         async with async_session_factory() as session:
             result = await session.execute(
-                select(Strategy).where(Strategy.is_active == True)
+                select(Strategy).where(Strategy.is_active.is_(True))
             )
             strategies = result.scalars().all()
         plan: dict[str, set[str]] = {}
@@ -57,11 +51,12 @@ class DataCollector:
             if start >= now:
                 return
             days_back = (now - start).days + 1
-            provider = _select_provider(timeframe, days_back)
+            provider = self._yfinance
             try:
                 df = await provider.get_bars(symbol, timeframe, start, now)
                 if not df.empty:
                     await repository.save_bars(session, inst.id, timeframe, df)
+                    await session.commit()
                     logger.info("Synced %s %s: %d bars", symbol, timeframe, len(df))
             except Exception as e:
                 logger.error("Failed to sync %s %s: %s", symbol, timeframe, e)

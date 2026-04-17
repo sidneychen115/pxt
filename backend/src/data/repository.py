@@ -7,14 +7,15 @@ from src.core.models import Instrument, OhlcvBar
 
 
 async def upsert_instrument(session: AsyncSession, symbol: str, type_: str, **kwargs) -> Instrument:
+    updates = {k: v for k, v in kwargs.items() if v is not None}
+    updates["type"] = type_
     stmt = (
         insert(Instrument)
         .values(symbol=symbol, type=type_, **kwargs)
-        .on_conflict_do_update(index_elements=["symbol"], set_={"name": kwargs.get("name")})
+        .on_conflict_do_update(index_elements=["symbol"], set_=updates)
         .returning(Instrument)
     )
     result = await session.execute(stmt)
-    await session.commit()
     return result.scalar_one()
 
 
@@ -25,6 +26,9 @@ async def save_bars(
     df: pd.DataFrame,
 ) -> int:
     """Insert bars, skip duplicates. Returns count of new rows inserted."""
+    if df.empty:
+        return 0
+    df = df.dropna(subset=["open", "high", "low", "close"])
     if df.empty:
         return 0
     rows = [
@@ -44,7 +48,6 @@ async def save_bars(
     ]
     stmt = insert(OhlcvBar).values(rows).on_conflict_do_nothing()
     result = await session.execute(stmt)
-    await session.commit()
     return result.rowcount
 
 
@@ -69,7 +72,7 @@ async def get_bars(
     df = pd.DataFrame([
         {"bar_time": b.bar_time, "open": float(b.open), "high": float(b.high),
          "low": float(b.low), "close": float(b.close),
-         "volume": b.volume, "vwap": float(b.vwap) if b.vwap else None}
+         "volume": b.volume, "vwap": float(b.vwap) if b.vwap is not None else None}
         for b in bars
     ]).set_index("bar_time").sort_index()
     return df

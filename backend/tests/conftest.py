@@ -21,6 +21,11 @@ async def setup_db(engine):
 
 @pytest.fixture
 async def session(engine) -> AsyncSession:
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    async with factory() as s:
-        yield s
+    async with engine.connect() as conn:
+        await conn.begin()
+        async_session = AsyncSession(bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint")
+        try:
+            yield async_session
+        finally:
+            await async_session.close()
+            await conn.rollback()
