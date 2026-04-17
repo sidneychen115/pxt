@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from src.core.database import Base
 
-TEST_DB_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/pxt_test"
+TEST_DB_URL = "postgresql+asyncpg://cx_user:cx_pass@localhost:5432/pxt_test"
 
 
 @pytest.fixture(scope="session")
