@@ -34,7 +34,7 @@ class SchwabProvider(DataProvider):
         return self._client
 
     @staticmethod
-    async def authenticate():
+    def authenticate() -> None:
         """One-time browser-based OAuth flow. Run once to create the token file."""
         schwab.auth.easy_client(
             settings.schwab_api_key,
@@ -47,7 +47,9 @@ class SchwabProvider(DataProvider):
         self, symbol: str, timeframe: str, start: datetime, end: datetime
     ) -> pd.DataFrame:
         client = self._get_client()
-        freq_type, freq = _FREQ_MAP.get(timeframe, (Client.PriceHistory.FrequencyType.DAILY, 1))
+        if timeframe not in _FREQ_MAP:
+            raise ValueError(f"Unsupported timeframe '{timeframe}'. Valid: {list(_FREQ_MAP)}")
+        freq_type, freq = _FREQ_MAP[timeframe]
         loop = asyncio.get_running_loop()
         resp = await loop.run_in_executor(
             None,
@@ -124,6 +126,10 @@ class SchwabProvider(DataProvider):
             "ask": quote.get("askPrice"),
             "last": quote.get("lastPrice"),
             "volume": quote.get("totalVolume"),
-            "timestamp": datetime.now(timezone.utc),
+            "timestamp": (
+                datetime.fromtimestamp(quote["quoteTime"] / 1000, tz=timezone.utc)
+                if quote.get("quoteTime")
+                else datetime.now(timezone.utc)
+            ),
             "source": "schwab",
         }
