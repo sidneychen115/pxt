@@ -77,3 +77,25 @@ async def test_insufficient_data_no_signal(strategy):
     ctx = MockDataContext(df)
     signals = await strategy.generate_signals(["SPY"], {"fast": 5, "slow": 20}, ctx)
     assert signals == []
+
+
+async def test_get_bars_returns_none_no_crash(strategy):
+    """Strategy should skip symbol gracefully when context returns None."""
+    class NullDataContext(DataContext):
+        async def get_bars(self, symbol, timeframe, limit=200):
+            return None
+        async def get_option_chain(self, underlying, expiry=None):
+            return pd.DataFrame()
+        async def get_latest_quote(self, symbol):
+            return {}
+
+    ctx = NullDataContext()
+    signals = await strategy.generate_signals(["SPY"], {"fast": 5, "slow": 20}, ctx)
+    assert signals == []
+
+
+async def test_fast_greater_than_slow_no_crash(strategy):
+    """Inverted parameters (fast > slow) should produce no signal, not crash."""
+    ctx = MockDataContext(make_crossover_df("golden"))
+    signals = await strategy.generate_signals(["SPY"], {"fast": 40, "slow": 20}, ctx)
+    assert signals == []
