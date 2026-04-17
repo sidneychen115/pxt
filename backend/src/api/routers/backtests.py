@@ -160,10 +160,17 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                     pnl=t.pnl, pnl_pct=t.pnl_pct, hold_days=t.hold_days,
                     exit_reason=t.exit_reason, entry_signal=t.entry_signal,
                 ))
-            for ts, equity in metrics.equity_curve.items():
+            # Compute drawdown series from equity curve
+            equity_series = metrics.equity_curve
+            rolling_max = equity_series.expanding().max()
+            drawdown_series = (equity_series - rolling_max) / rolling_max
+
+            for ts, equity in equity_series.items():
                 session.add(BacktestEquityCurve(
                     backtest_id=backtest_id, ts=ts,
-                    equity=equity, cash=equity, drawdown=None,
+                    equity=float(equity),
+                    cash=float(equity),   # cash approximation (engine doesn't expose per-ts cash)
+                    drawdown=float(drawdown_series[ts]),
                 ))
             await session.execute(
                 update(Backtest).where(Backtest.id == backtest_id).values(
