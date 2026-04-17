@@ -11,21 +11,17 @@ from src.core.models import Strategy, SystemEvent
 from src.strategies.live_context import LiveDataContext
 from src.strategies.registry import REGISTRY, discover_strategies
 from src.data.collector import DataCollector
+from src.signals.processor import SignalProcessor
 
 logger = logging.getLogger(__name__)
 TZ = ZoneInfo(settings.timezone)
-
-
-class _SignalProcessorStub:
-    async def process_pending(self) -> None:
-        pass  # will be replaced by SignalProcessor in Phase D
 
 
 class StrategyScheduler:
     def __init__(self):
         self._scheduler = AsyncIOScheduler(timezone=str(TZ))
         self._collector = DataCollector()
-        self._signal_processor = _SignalProcessorStub()
+        self._signal_processor = SignalProcessor()
 
     async def start(self) -> None:
         discover_strategies()
