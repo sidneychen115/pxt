@@ -77,6 +77,6 @@ export interface SystemEvent {
   event_type: string
   level: 'info' | 'warning' | 'error'
   message: string
-  details: Record<string, unknown>
+  details: Record<string, unknown> | null
   created_at: string
 }
