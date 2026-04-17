@@ -88,7 +88,7 @@ class StrategyScheduler:
             try:
                 self._scheduler.remove_job(f"strategy_{strategy_id}")
             except Exception:
-                pass
+                logger.debug("Job 'strategy_%s' not found in scheduler, nothing to remove.", strategy_id)
 
     async def _run_data_sync(self) -> None:
         try:
@@ -139,7 +139,6 @@ class StrategyScheduler:
 
     async def _save_signals(self, session, config: Strategy, signals) -> None:
         from src.core.models import TradeSignalRecord, Instrument
-        from sqlalchemy.dialects.postgresql import insert as pg_insert
         from sqlalchemy import select as sa_select
         now = datetime.now(timezone.utc)
         for sig in signals:
@@ -149,7 +148,7 @@ class StrategyScheduler:
             stock_id = inst_result.scalar_one_or_none()
             if stock_id is None:
                 continue
-            stmt = pg_insert(TradeSignalRecord).values(
+            session.add(TradeSignalRecord(
                 strategy_id=config.id,
                 stock_id=stock_id,
                 signal_time=now,
@@ -161,23 +160,19 @@ class StrategyScheduler:
                 confidence=sig.confidence,
                 reasoning=sig.reasoning,
                 status="pending",
-            ).on_conflict_do_nothing()
-            await session.execute(stmt)
+            ))
         await session.commit()
 
     async def _log_event(
         self, event_type: str, level: str, message: str, session=None
     ) -> None:
-        close_after = session is None
-        if session is None:
-            session = async_session_factory()
-            await session.__aenter__()
-        try:
+        if session is not None:
             session.add(SystemEvent(event_type=event_type, level=level, message=message))
             await session.commit()
-        finally:
-            if close_after:
-                await session.__aexit__(None, None, None)
+        else:
+            async with async_session_factory() as s:
+                s.add(SystemEvent(event_type=event_type, level=level, message=message))
+                await s.commit()
         if level == "error":
             logger.error("[%s] %s", event_type, message)
         else:
