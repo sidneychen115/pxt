@@ -1,5 +1,5 @@
 from datetime import date, datetime, timezone
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,7 +21,7 @@ class BacktestRequest(BaseModel):
 @router.get("/")
 async def list_backtests(
     strategy_id: str | None = None,
-    limit: int = 20,
+    limit: int = Query(20, ge=1, le=200),
     session: AsyncSession = Depends(get_session),
 ):
     query = select(Backtest).order_by(desc(Backtest.created_at)).limit(limit)
@@ -69,7 +69,9 @@ async def get_backtest_trades(
     order: str = "asc",
     session: AsyncSession = Depends(get_session),
 ):
-    col = getattr(BacktestTrade, sort_by, BacktestTrade.entry_time)
+    _ALLOWED_SORT = {"entry_time", "exit_time", "pnl", "pnl_pct", "symbol"}
+    col_name = sort_by if sort_by in _ALLOWED_SORT else "entry_time"
+    col = getattr(BacktestTrade, col_name)
     direction = col.asc() if order == "asc" else col.desc()
     result = await session.execute(
         select(BacktestTrade)
@@ -189,11 +191,13 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                 )
             )
             await session.commit()
-    except Exception:
+    except Exception as e:
         import logging
         logging.getLogger(__name__).exception("Backtest %d failed", backtest_id)
         async with async_session_factory() as session:
             await session.execute(
-                update(Backtest).where(Backtest.id == backtest_id).values(status="failed")
+                update(Backtest).where(Backtest.id == backtest_id).values(
+                    status="failed", error_message=str(e)
+                )
             )
             await session.commit()

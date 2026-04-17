@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,18 +48,26 @@ async def get_strategy(strategy_id: str, session: AsyncSession = Depends(get_ses
 async def update_strategy(
     strategy_id: str,
     body: StrategyUpdate,
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ):
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(400, "No fields to update.")
-    if "symbols" in updates and len(updates["symbols"]) > 50:
-        raise HTTPException(400, "Exceeds max_symbols limit.")
-    await session.execute(
-        update(Strategy).where(Strategy.id == strategy_id).values(**updates)
+    if "symbols" in updates:
+        max_sym = updates.get("max_symbols") or 50
+        if len(updates["symbols"]) > max_sym:
+            raise HTTPException(400, f"Exceeds max_symbols limit of {max_sym}.")
+    result = await session.execute(
+        update(Strategy)
+        .where(Strategy.id == strategy_id)
+        .values(**updates)
+        .returning(Strategy.id)
     )
+    if not result.scalar_one_or_none():
+        raise HTTPException(404, f"Strategy '{strategy_id}' not found.")
     await session.commit()
-    from src.api.main import _scheduler
-    if _scheduler:
-        await _scheduler.reload_strategy(strategy_id)
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        await scheduler.reload_strategy(strategy_id)
     return {"ok": True}
