@@ -12,7 +12,8 @@ import SignalBadge from '../components/SignalBadge'
 
 export default function Backtests() {
   const { id } = useParams<{ id?: string }>()
-  return id ? <BacktestDetail id={parseInt(id, 10)} /> : <BacktestList />
+  const numId = id ? parseInt(id, 10) : NaN
+  return !isNaN(numId) ? <BacktestDetail id={numId} /> : <BacktestList />
 }
 
 function BacktestList() {
@@ -117,7 +118,7 @@ function BacktestList() {
             </button>
             <button
               onClick={() => triggerMutation.mutate()}
-              disabled={!form.strategy_id || !form.symbols}
+              disabled={!form.strategy_id || !form.symbols || triggerMutation.isPending}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-500 rounded text-sm font-semibold disabled:opacity-50"
             >
               {triggerMutation.isPending ? 'Starting...' : 'Run Backtest'}
@@ -130,7 +131,10 @@ function BacktestList() {
         {backtests?.map(bt => (
           <div
             key={bt.id}
+            role="button"
+            tabIndex={0}
             onClick={() => navigate(`/backtests/${bt.id}`)}
+            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') navigate(`/backtests/${bt.id}`) }}
             className="bg-gray-900 rounded-xl p-4 border border-gray-800 hover:border-gray-600 cursor-pointer"
           >
             <div className="flex items-center justify-between">

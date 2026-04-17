@@ -83,13 +83,13 @@ function StrategyEditModal({ strategy, onClose }: { strategy: Strategy; onClose:
       <div className="bg-gray-900 rounded-xl p-6 w-full max-w-md border border-gray-700 space-y-4">
         <h2 className="text-lg font-bold">Edit: {strategy.name}</h2>
         <div>
-          <label className="text-xs text-gray-400">Symbols (comma separated)</label>
-          <input value={symbols} onChange={e => setSymbols(e.target.value)}
+          <label htmlFor="symbols-input" className="text-xs text-gray-400">Symbols (comma separated)</label>
+          <input id="symbols-input" value={symbols} onChange={e => setSymbols(e.target.value)}
             className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1" />
         </div>
         <div>
-          <label className="text-xs text-gray-400">Cron Schedule</label>
-          <input value={frequency} onChange={e => setFrequency(e.target.value)}
+          <label htmlFor="frequency-input" className="text-xs text-gray-400">Cron Schedule</label>
+          <input id="frequency-input" value={frequency} onChange={e => setFrequency(e.target.value)}
             className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1 font-mono" />
         </div>
         <div className="flex gap-2 justify-end">
