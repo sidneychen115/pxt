@@ -8,3 +8,10 @@ node_modules/
 dist/
 .DS_Store
 schwab_token.json
+.idea/
+.vscode/
+*.swp
+.coverage
+htmlcov/
+logs/
+*.log
