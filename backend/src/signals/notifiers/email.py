@@ -1,3 +1,4 @@
+import logging
 import aiosmtplib
 from email.message import EmailMessage
 from src.core.config import settings
@@ -42,6 +43,5 @@ Do NOT act on this without your own due diligence.
             )
             return True
         except Exception as e:
-            import logging
             logging.getLogger(__name__).error("Email send failed: %s", e)
             return False

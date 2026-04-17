@@ -7,6 +7,14 @@ from src.core.models import Instrument, Strategy, TradeSignalRecord
 from src.signals.processor import SignalProcessor
 
 
+async def _fetch_signal(session, signal_id: int) -> TradeSignalRecord:
+    """Re-fetch a signal by PK (needed after expunge_all detaches it)."""
+    result = await session.execute(
+        select(TradeSignalRecord).where(TradeSignalRecord.id == signal_id)
+    )
+    return result.scalar_one()
+
+
 def _make_session_factory(session):
     """Return a context-manager factory that always yields the shared test session."""
     @asynccontextmanager
@@ -60,8 +68,9 @@ async def test_process_pending_sends_notification(session):
     mock_send.assert_called_once()
 
     # Verify DB status was updated to "notified"
-    await session.refresh(signal)
-    assert signal.status == "notified"
+    # expunge_all() detaches signal from the shared session, so re-fetch by PK
+    refreshed = await _fetch_signal(session, signal.id)
+    assert refreshed.status == "notified"
 
 
 async def test_process_pending_keeps_pending_on_failure(session):
@@ -95,8 +104,9 @@ async def test_process_pending_keeps_pending_on_failure(session):
     assert count == 0
     mock_send.assert_called_once()
 
-    await session.refresh(signal)
-    assert signal.status == "pending"
+    # expunge_all() detaches signal from the shared session, so re-fetch by PK
+    refreshed = await _fetch_signal(session, signal.id)
+    assert refreshed.status == "pending"
 
 
 async def test_get_symbol_stock(session):

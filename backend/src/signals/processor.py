@@ -25,6 +25,7 @@ class SignalProcessor:
                 .limit(50)
             )
             signals = result.scalars().all()
+            session.expunge_all()  # detach safely before session closes
 
         processed = 0
         notifier = _get_notifier()
