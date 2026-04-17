@@ -25,7 +25,6 @@ class SignalProcessor:
                 .limit(50)
             )
             signals = result.scalars().all()
-            session.expunge_all()  # detach safely before session closes
 
         processed = 0
         notifier = _get_notifier()
@@ -33,16 +32,19 @@ class SignalProcessor:
             symbol = await self._get_symbol(signal)
             success = await notifier.send(signal, symbol)
             new_status = "notified" if success else "pending"
-            async with async_session_factory() as session:
-                await session.execute(
-                    update(TradeSignalRecord)
-                    .where(TradeSignalRecord.id == signal.id)
-                    .values(status=new_status)
-                )
-                await session.commit()
-            if success:
-                processed += 1
-                logger.info("Signal %d notified for %s", signal.id, symbol)
+            try:
+                async with async_session_factory() as session:
+                    await session.execute(
+                        update(TradeSignalRecord)
+                        .where(TradeSignalRecord.id == signal.id)
+                        .values(status=new_status)
+                    )
+                    await session.commit()
+                if success:
+                    processed += 1
+                    logger.info("Signal %d notified for %s", signal.id, symbol)
+            except Exception:
+                logger.exception("Failed to update status for signal %d", signal.id)
         return processed
 
     async def _get_symbol(self, signal: TradeSignalRecord) -> str:

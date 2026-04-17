@@ -5,13 +5,15 @@ from src.core.config import settings
 from src.signals.notifiers.base import BaseNotifier
 from src.core.models import TradeSignalRecord
 
+logger = logging.getLogger(__name__)
+
 
 class EmailNotifier(BaseNotifier):
     async def send(self, signal: TradeSignalRecord, instrument_symbol: str) -> bool:
         msg = EmailMessage()
         msg["From"] = settings.smtp_user
         msg["To"] = settings.notify_email
-        msg["Subject"] = f"[PXT] {signal.direction.upper()} Signal — {instrument_symbol}"
+        msg["Subject"] = f"[PXT] {signal.direction.upper()} Signal - {instrument_symbol}"
         direction_emoji = "🟢" if signal.direction == "buy" else "🔴"
         msg.set_content(f"""{direction_emoji} Trade Signal Generated
 
@@ -42,6 +44,6 @@ Do NOT act on this without your own due diligence.
                 start_tls=True,
             )
             return True
-        except Exception as e:
-            logging.getLogger(__name__).error("Email send failed: %s", e)
+        except Exception:
+            logger.exception("Email send failed")
             return False
