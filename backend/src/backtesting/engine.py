@@ -56,6 +56,7 @@ class BacktestEngine:
                 fill_price = float(future["open"].iloc[0])
                 fill_time = future.index[0]
 
+                # Note: "sell" signals only close existing long positions; short selling not supported.
                 if sig.direction == "buy" and sym not in positions:
                     qty = sig.quantity or max(1, int(cash * 0.1 / fill_price))
                     cost = qty * fill_price
@@ -79,7 +80,7 @@ class BacktestEngine:
             for sym, trade in positions.items():
                 tf_df = data.get(sym, {}).get(timeframe)
                 if tf_df is not None:
-                    past = tf_df[tf_df.index <= current_time]
+                    past = tf_df[tf_df.index < next_time]
                     if not past.empty:
                         portfolio_value += trade.quantity * float(past["close"].iloc[-1])
             equity_series[current_time] = portfolio_value

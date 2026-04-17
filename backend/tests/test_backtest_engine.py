@@ -29,6 +29,7 @@ async def test_backtest_runs_without_error():
     assert metrics.initial_capital == 10_000
     assert metrics.final_equity > 0
     assert isinstance(metrics.equity_curve, pd.Series)
+    assert len(metrics.equity_curve) > 0
 
 
 async def test_backtest_metrics_range():
@@ -53,3 +54,23 @@ async def test_look_ahead_prevention():
     result = await ctx.get_bars("SPY", "1d", limit=200)
     assert len(result) == 4
     assert all(result.index < cutoff)
+
+
+async def test_profit_factor_no_losers():
+    """profit_factor returns None (not infinity) when no losing trades."""
+    from src.backtesting.metrics import BacktestMetrics, TradeRecord
+    from datetime import datetime, timezone
+    trade = TradeRecord(
+        symbol="SPY", direction="buy", quantity=1.0,
+        entry_time=datetime(2023, 1, 2, tzinfo=timezone.utc), entry_price=100.0,
+        exit_time=datetime(2023, 1, 3, tzinfo=timezone.utc), exit_price=110.0,
+        exit_reason="signal",
+    )
+    equity = pd.Series([10000.0, 11000.0])
+    metrics = BacktestMetrics(
+        initial_capital=10000.0, final_equity=11000.0,
+        trades=[trade], equity_curve=equity,
+    )
+    assert metrics.profit_factor is None  # no losing trades → None, not inf
+    assert metrics.win_rate == 1.0
+    assert metrics.total_return == pytest.approx(0.1)

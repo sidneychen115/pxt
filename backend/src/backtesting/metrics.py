@@ -60,7 +60,7 @@ class BacktestMetrics:
     @property
     def sharpe_ratio(self) -> float:
         daily = self.equity_curve.pct_change().dropna()
-        if daily.std() == 0:
+        if len(daily) == 0 or daily.std() == 0:
             return 0.0
         return float(daily.mean() / daily.std() * np.sqrt(252))
 
@@ -79,11 +79,11 @@ class BacktestMetrics:
         return winners / len(closed)
 
     @property
-    def profit_factor(self) -> float:
+    def profit_factor(self) -> float | None:
         closed = [t for t in self.trades if t.pnl is not None]
         gross_profit = sum(t.pnl for t in closed if t.pnl > 0)
         gross_loss = abs(sum(t.pnl for t in closed if t.pnl < 0))
-        return gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        return gross_profit / gross_loss if gross_loss > 0 else None
 
     @property
     def total_trades(self) -> int:
