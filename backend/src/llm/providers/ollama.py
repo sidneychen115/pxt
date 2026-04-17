@@ -8,6 +8,10 @@ class OllamaProvider(BaseLLMProvider):
         self._model = model
         self._base_url = settings.ollama_base_url
 
+    @property
+    def model_name(self) -> str:
+        return self._model
+
     async def complete(self, prompt: str) -> str:
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(

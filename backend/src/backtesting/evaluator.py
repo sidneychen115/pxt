@@ -18,6 +18,9 @@ def _get_provider() -> BaseLLMProvider:
 
 
 class LLMEvaluator:
+    def __init__(self):
+        self._provider = _get_provider()
+
     async def evaluate(
         self,
         metrics: BacktestMetrics,
@@ -25,7 +28,6 @@ class LLMEvaluator:
         strategy_description: str,
     ) -> tuple[str, str]:
         """Returns (evaluation_text, model_name)."""
-        provider = _get_provider()
         profit_factor_str = (
             f"{metrics.profit_factor:.2f}" if metrics.profit_factor is not None else "N/A (no losing trades)"
         )
@@ -52,6 +54,6 @@ Please provide:
 5. Verdict: is this strategy worth trading live? (Yes / No / Needs Work)
 
 Be concise and direct. Use bullet points."""
-        evaluation = await provider.complete(prompt)
-        model_name = settings.llm_provider
+        evaluation = await self._provider.complete(prompt)
+        model_name = self._provider.model_name
         return evaluation, model_name
