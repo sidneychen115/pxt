@@ -10,7 +10,7 @@ class DataProvider(ABC):
     - option_chain: columns=[symbol, underlying, expiry, strike, option_type,
                               bid, ask, last, volume, open_interest,
                               iv, delta, gamma, theta, vega]
-    - quote: dict with keys [symbol, bid, ask, last, volume, timestamp]
+    - quote: dict with keys [symbol, bid, ask, last, volume, timestamp, source]
     """
 
     @abstractmethod

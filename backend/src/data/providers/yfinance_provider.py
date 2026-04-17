@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from functools import partial
 import pandas as pd
 import yfinance as yf
@@ -17,13 +17,15 @@ class YFinanceProvider(DataProvider):
     ) -> pd.DataFrame:
         interval = YFINANCE_INTERVALS.get(timeframe, "1d")
         loop = asyncio.get_running_loop()
+        intraday_intervals = {"1m", "5m", "15m", "30m", "1h"}
+        fmt = "%Y-%m-%dT%H:%M:%S" if interval in intraday_intervals else "%Y-%m-%d"
         df = await loop.run_in_executor(
             None,
             partial(
                 yf.download,
                 tickers=symbol,
-                start=start.strftime("%Y-%m-%d"),
-                end=end.strftime("%Y-%m-%d"),
+                start=start.strftime(fmt),
+                end=end.strftime(fmt),
                 interval=interval,
                 auto_adjust=True,
                 progress=False,
@@ -48,7 +50,10 @@ class YFinanceProvider(DataProvider):
         loop = asyncio.get_running_loop()
         ticker = await loop.run_in_executor(None, yf.Ticker, underlying)
         expiry_str = expiry.strftime("%Y-%m-%d") if expiry else None
-        opt = await loop.run_in_executor(None, ticker.option_chain, expiry_str)
+        if expiry_str:
+            opt = await loop.run_in_executor(None, ticker.option_chain, expiry_str)
+        else:
+            opt = await loop.run_in_executor(None, ticker.option_chain)
         calls = opt.calls.copy()
         calls["option_type"] = "call"
         puts = opt.puts.copy()
@@ -67,12 +72,20 @@ class YFinanceProvider(DataProvider):
         loop = asyncio.get_running_loop()
         ticker = await loop.run_in_executor(None, yf.Ticker, symbol)
         info = await loop.run_in_executor(None, lambda: ticker.fast_info)
+        bid = getattr(info, "bid", None)
+        ask = getattr(info, "ask", None)
+        if bid is None or ask is None:
+            full_info = await loop.run_in_executor(None, lambda: ticker.info)
+            if bid is None:
+                bid = full_info.get("bid")
+            if ask is None:
+                ask = full_info.get("ask")
         return {
             "symbol": symbol,
             "last": getattr(info, "last_price", None),
-            "bid": getattr(info, "bid", None),
-            "ask": getattr(info, "ask", None),
-            "volume": getattr(info, "three_month_average_volume", None),
-            "timestamp": datetime.utcnow(),
+            "bid": bid,
+            "ask": ask,
+            "volume": getattr(info, "last_volume", None),
+            "timestamp": datetime.now(timezone.utc),
             "source": "yfinance",
         }
