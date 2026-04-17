@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Literal
+from typing import ClassVar, Literal
 import pandas as pd
 
 
@@ -16,6 +16,12 @@ class TradeSignal:
     confidence: float = 1.0          # 0.0–1.0
     reasoning: str = ""
     option_symbol: str | None = None  # set for options trades
+
+    def __post_init__(self) -> None:
+        if not (0.0 <= self.confidence <= 1.0):
+            raise ValueError(
+                f"confidence must be between 0.0 and 1.0, got {self.confidence!r}"
+            )
 
 
 class DataContext(ABC):
@@ -44,13 +50,13 @@ class BaseStrategy(ABC):
     only the injected DataContext differs.
     """
 
-    id: str                          # must match strategies.id in DB
-    name: str
-    description: str = ""
-    default_symbols: list[str] = []
-    default_timeframes: list[str] = ["1d"]
-    default_frequency: str = "0 16 * * 1-5"   # cron: weekdays at 4pm CT
-    default_parameters: dict = {}
+    id: ClassVar[str]                          # must match strategies.id in DB
+    name: ClassVar[str]
+    description: ClassVar[str] = ""
+    default_symbols: ClassVar[list[str]] = []
+    default_timeframes: ClassVar[list[str]] = ["1d"]
+    default_frequency: ClassVar[str] = "0 16 * * 1-5"   # cron: weekdays at 4pm CT
+    default_parameters: ClassVar[dict] = {}
 
     @abstractmethod
     async def generate_signals(
