@@ -44,12 +44,16 @@ class BacktestEngine:
     def _update_state(self, state: _PositionState, bar: pd.Series) -> None:
         """Update peak_price (trailing activation added in Task 5)."""
         ep = self._exit_policy
+        if ep is None:
+            return
         check_price = float(bar["high"]) if ep.price_check_mode == "ohlc" else float(bar["close"])
         state.peak_price = max(state.peak_price, check_price)
 
     def _check_exit(self, state: _PositionState, bar: pd.Series) -> str | None:
         """Return exit reason if position should exit this bar, else None."""
         ep = self._exit_policy
+        if ep is None:
+            return None
         if ep.price_check_mode == "ohlc":
             low = float(bar["low"])
             if state.stop_price is not None and low <= state.stop_price:
@@ -64,10 +68,13 @@ class BacktestEngine:
         """Compute exact fill price for intrabar (ohlc mode) exits."""
         ep = self._exit_policy
         if reason == "stop_loss":
+            assert state.stop_price is not None
             return state.stop_price
         if reason == "take_profit":
+            assert state.take_profit_price is not None, "take_profit exit with no TP price configured"
             return state.take_profit_price
         if reason == "trailing_stop":
+            assert ep is not None and ep.trailing_stop_pct is not None
             return state.peak_price * (1 - ep.trailing_stop_pct)
         raise ValueError(f"Unknown exit reason for ohlc fill: {reason}")
 
