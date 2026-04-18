@@ -21,6 +21,56 @@ class BacktestEngine:
         self._capital = initial_capital
         self._exit_policy = exit_policy
 
+    def _compute_stop_price(self, entry: float, qty: float) -> float | None:
+        ep = self._exit_policy
+        if ep is None:
+            return None
+        if ep.stop_loss_pct is not None:
+            return entry * (1 - ep.stop_loss_pct)
+        if ep.stop_loss_abs is not None:
+            return entry - ep.stop_loss_abs / qty
+        return None
+
+    def _compute_tp_price(self, entry: float, qty: float) -> float | None:
+        ep = self._exit_policy
+        if ep is None:
+            return None
+        if ep.take_profit_pct is not None:
+            return entry * (1 + ep.take_profit_pct)
+        if ep.take_profit_abs is not None:
+            return entry + ep.take_profit_abs / qty
+        return None
+
+    def _update_state(self, state: _PositionState, bar: pd.Series) -> None:
+        """Update peak_price (trailing activation added in Task 5)."""
+        ep = self._exit_policy
+        check_price = float(bar["high"]) if ep.price_check_mode == "ohlc" else float(bar["close"])
+        state.peak_price = max(state.peak_price, check_price)
+
+    def _check_exit(self, state: _PositionState, bar: pd.Series) -> str | None:
+        """Return exit reason if position should exit this bar, else None."""
+        ep = self._exit_policy
+        if ep.price_check_mode == "ohlc":
+            low = float(bar["low"])
+            if state.stop_price is not None and low <= state.stop_price:
+                return "stop_loss"
+        else:
+            close = float(bar["close"])
+            if state.stop_price is not None and close <= state.stop_price:
+                return "stop_loss"
+        return None
+
+    def _ohlc_fill_price(self, state: _PositionState, reason: str) -> float:
+        """Compute exact fill price for intrabar (ohlc mode) exits."""
+        ep = self._exit_policy
+        if reason == "stop_loss":
+            return state.stop_price
+        if reason == "take_profit":
+            return state.take_profit_price
+        if reason == "trailing_stop":
+            return state.peak_price * (1 - ep.trailing_stop_pct)
+        raise ValueError(f"Unknown exit reason for ohlc fill: {reason}")
+
     async def run(
         self,
         strategy: BaseStrategy,
@@ -67,6 +117,32 @@ class BacktestEngine:
                         closed_trades.append(state.trade)
             pending_close_exits.clear()
 
+            # Check exit policy on current bar (runs before strategy signals)
+            if self._exit_policy:
+                for sym in list(positions):
+                    state = positions[sym]
+                    bar_df = data.get(sym, {}).get(timeframe)
+                    if bar_df is None:
+                        continue
+                    row = bar_df[bar_df.index == current_time]
+                    if row.empty:
+                        continue
+                    bar = row.iloc[0]
+                    self._update_state(state, bar)
+                    reason = self._check_exit(state, bar)
+                    if reason:
+                        if self._exit_policy.price_check_mode == "ohlc":
+                            fill_price = self._ohlc_fill_price(state, reason)
+                            state.trade.exit_time = current_time
+                            state.trade.exit_price = fill_price
+                            state.trade.exit_reason = reason
+                            cash += state.trade.quantity * fill_price
+                            closed_trades.append(state.trade)
+                            del positions[sym]
+                        else:
+                            # Invariant: positions.pop(sym) is paired with adding to pending_close_exits
+                            pending_close_exits[sym] = (reason, positions.pop(sym))
+
             # Fill orders at next bar's open price
             ctx = BacktestDataContext(data, current_time)
             signals = await strategy.generate_signals(symbols, parameters, ctx)
@@ -96,6 +172,8 @@ class BacktestEngine:
                         positions[sym] = _PositionState(
                             trade=trade,
                             peak_price=fill_price,
+                            stop_price=self._compute_stop_price(fill_price, qty),
+                            take_profit_price=self._compute_tp_price(fill_price, qty),
                         )
                 elif sig.direction == "sell" and sym in positions:
                     state = positions.pop(sym)
