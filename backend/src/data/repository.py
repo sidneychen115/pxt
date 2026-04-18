@@ -78,6 +78,35 @@ async def get_bars(
     return df
 
 
+async def get_bars_range(
+    session: AsyncSession,
+    instrument_id: int,
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+) -> pd.DataFrame:
+    """Return all bars for instrument between start and end (inclusive)."""
+    result = await session.execute(
+        select(OhlcvBar)
+        .where(
+            OhlcvBar.instrument_id == instrument_id,
+            OhlcvBar.timeframe == timeframe,
+            OhlcvBar.bar_time >= start,
+            OhlcvBar.bar_time <= end,
+        )
+        .order_by(OhlcvBar.bar_time)
+    )
+    bars = result.scalars().all()
+    if not bars:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "vwap"])
+    return pd.DataFrame([
+        {"bar_time": b.bar_time, "open": float(b.open), "high": float(b.high),
+         "low": float(b.low), "close": float(b.close),
+         "volume": b.volume, "vwap": float(b.vwap) if b.vwap is not None else None}
+        for b in bars
+    ]).set_index("bar_time").sort_index()
+
+
 async def get_latest_bar_time(
     session: AsyncSession, instrument_id: int, timeframe: str
 ) -> datetime | None:

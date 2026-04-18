@@ -131,19 +131,65 @@ def _backtest_summary(bt: Backtest) -> dict:
     }
 
 
+async def _fetch_with_cache(sym: str, timeframe: str, start: datetime, end: datetime) -> "pd.DataFrame":
+    """Return bars for sym in [start, end], using DB cache and filling gaps from yfinance."""
+    import pandas as pd
+    from src.data.providers.yfinance_provider import YFinanceProvider
+    from src.data.repository import get_bars_range, save_bars, upsert_instrument
+
+    provider = YFinanceProvider()
+
+    async with async_session_factory() as session:
+        instrument = await upsert_instrument(session, sym, "stock")
+        await session.commit()
+        instrument_id = instrument.id
+        cached = await get_bars_range(session, instrument_id, timeframe, start, end)
+
+    async def _fetch_and_save(fetch_start: datetime, fetch_end: datetime) -> "pd.DataFrame":
+        df = await provider.get_bars(sym, timeframe, fetch_start, fetch_end)
+        if not df.empty:
+            async with async_session_factory() as session:
+                await save_bars(session, instrument_id, timeframe, df)
+                await session.commit()
+        return df
+
+    if cached.empty:
+        return await _fetch_and_save(start, end)
+
+    parts = [cached]
+
+    # Fill missing head
+    first_cached = cached.index[0]
+    if first_cached.to_pydatetime().replace(tzinfo=timezone.utc) > start:
+        df_head = await _fetch_and_save(start, first_cached.to_pydatetime().replace(tzinfo=timezone.utc))
+        if not df_head.empty:
+            parts.insert(0, df_head)
+
+    # Fill missing tail
+    last_cached = cached.index[-1]
+    if last_cached.to_pydatetime().replace(tzinfo=timezone.utc) < end:
+        df_tail = await _fetch_and_save(last_cached.to_pydatetime().replace(tzinfo=timezone.utc), end)
+        if not df_tail.empty:
+            df_tail = df_tail[df_tail.index > last_cached]
+            if not df_tail.empty:
+                parts.append(df_tail)
+
+    if len(parts) == 1:
+        return parts[0]
+    return pd.concat(parts).sort_index()
+
+
 async def _run_backtest(backtest_id: int, req: BacktestRequest):
     from src.backtesting.engine import BacktestEngine
     from src.backtesting.evaluator import LLMEvaluator
-    from src.data.providers.yfinance_provider import YFinanceProvider
     from src.strategies.registry import REGISTRY, discover_strategies
     discover_strategies()
     try:
-        provider = YFinanceProvider()
         start = datetime(req.start_date.year, req.start_date.month, req.start_date.day, tzinfo=timezone.utc)
         end = datetime(req.end_date.year, req.end_date.month, req.end_date.day, tzinfo=timezone.utc)
         data: dict = {}
         for sym in req.symbols:
-            df = await provider.get_bars(sym, "1d", start, end)
+            df = await _fetch_with_cache(sym, "1d", start, end)
             if not df.empty:
                 data[sym] = {"1d": df}
         if not data:
