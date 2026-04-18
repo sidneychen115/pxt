@@ -66,3 +66,19 @@ def test_multiple_pivots_detected():
     ph, _ = _detect_pivots(high, low, prd=2)
     assert ph.iloc[4] == 150.0   # pivot at bar 2, confirmed at bar 4
     assert ph.iloc[8] == 160.0   # pivot at bar 6, confirmed at bar 8
+
+
+def test_plateau_is_not_a_pivot():
+    # Two bars tied for the max — Pine Script would not confirm either
+    high = pd.Series([100.0, 102.0, 150.0, 150.0, 100.0, 100.0])
+    low  = pd.Series([ 90.0] * 6)
+    ph, _ = _detect_pivots(high, low, prd=2)
+    assert ph.dropna().empty, "plateau must not produce a pivot"
+
+
+def test_multiple_pivots_low_series_is_clean():
+    # The multi-pivot test only checked highs; verify low series is all NaN for that input
+    high = pd.Series([100.0, 102.0, 150.0, 102.0, 100.0, 102.0, 160.0, 102.0, 100.0, 100.0])
+    low  = pd.Series([ 90.0] * 10)
+    _, pl = _detect_pivots(high, low, prd=2)
+    assert pl.dropna().empty, "flat low series must produce no pivot lows"

@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 from src.strategies.base import BaseStrategy, DataContext, TradeSignal
-from src.strategies.indicators import Indicators
 
 
 def _detect_pivots(
@@ -17,10 +16,10 @@ def _detect_pivots(
     pl = pd.Series(np.nan, index=low.index)
     for j in range(2 * prd, len(high)):
         window_h = high.iloc[j - 2 * prd : j + 1]
-        if high.iloc[j - prd] == window_h.max():
+        if high.iloc[j - prd] == window_h.max() and (window_h == window_h.max()).sum() == 1:
             ph.iloc[j] = high.iloc[j - prd]
         window_l = low.iloc[j - 2 * prd : j + 1]
-        if low.iloc[j - prd] == window_l.min():
+        if low.iloc[j - prd] == window_l.min() and (window_l == window_l.min()).sum() == 1:
             pl.iloc[j] = low.iloc[j - prd]
     return ph, pl
 
