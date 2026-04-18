@@ -157,6 +157,7 @@ class Backtest(Base):
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
+    exit_policy: Mapped[dict | None] = mapped_column(JSONB)
 
     trades: Mapped[list["BacktestTrade"]] = relationship(back_populates="backtest")
     equity_curve: Mapped[list["BacktestEquityCurve"]] = relationship(back_populates="backtest")
