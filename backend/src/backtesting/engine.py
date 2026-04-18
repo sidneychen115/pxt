@@ -236,7 +236,14 @@ class BacktestEngine:
             bar_df = data.get(sym, {}).get(timeframe)
             if bar_df is not None and not bar_df.empty:
                 last_bar = bar_df[bar_df.index == last_time]
-                fill_price = float(last_bar["open"].iloc[0]) if not last_bar.empty else float(bar_df["close"].iloc[-1])
+                if not last_bar.empty:
+                    fill_price = float(last_bar["open"].iloc[0])
+                else:
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        "pending close exit for %s: last bar missing, falling back to last close", sym
+                    )
+                    fill_price = float(bar_df["close"].iloc[-1])
                 state.trade.exit_time = last_time
                 state.trade.exit_price = fill_price
                 state.trade.exit_reason = reason

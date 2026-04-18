@@ -34,7 +34,9 @@ function BacktestList() {
   })
   const [exitPolicy, setExitPolicy] = useState({
     stop_loss_pct: '',
+    stop_loss_abs: '',
     take_profit_pct: '',
+    take_profit_abs: '',
     trailing_stop_pct: '',
     trailing_activate_pct: '',
     price_check_mode: 'close' as 'close' | 'ohlc',
@@ -50,13 +52,15 @@ function BacktestList() {
       parameters: {},
       exit_policy: (() => {
         const ep = {
-          stop_loss_pct: exitPolicy.stop_loss_pct ? parseFloat(exitPolicy.stop_loss_pct) / 100 : null,
-          take_profit_pct: exitPolicy.take_profit_pct ? parseFloat(exitPolicy.take_profit_pct) / 100 : null,
-          trailing_stop_pct: exitPolicy.trailing_stop_pct ? parseFloat(exitPolicy.trailing_stop_pct) / 100 : null,
-          trailing_activate_pct: exitPolicy.trailing_activate_pct ? parseFloat(exitPolicy.trailing_activate_pct) / 100 : null,
+          stop_loss_pct: exitPolicy.stop_loss_pct !== '' ? parseFloat(exitPolicy.stop_loss_pct) / 100 : null,
+          stop_loss_abs: exitPolicy.stop_loss_abs !== '' ? parseFloat(exitPolicy.stop_loss_abs) : null,
+          take_profit_pct: exitPolicy.take_profit_pct !== '' ? parseFloat(exitPolicy.take_profit_pct) / 100 : null,
+          take_profit_abs: exitPolicy.take_profit_abs !== '' ? parseFloat(exitPolicy.take_profit_abs) : null,
+          trailing_stop_pct: exitPolicy.trailing_stop_pct !== '' ? parseFloat(exitPolicy.trailing_stop_pct) / 100 : null,
+          trailing_activate_pct: exitPolicy.trailing_activate_pct !== '' ? parseFloat(exitPolicy.trailing_activate_pct) / 100 : null,
           price_check_mode: exitPolicy.price_check_mode,
         }
-        return (ep.stop_loss_pct || ep.take_profit_pct || ep.trailing_stop_pct || ep.trailing_activate_pct) ? ep : null
+        return (ep.stop_loss_pct || ep.stop_loss_abs || ep.take_profit_pct || ep.take_profit_abs || ep.trailing_stop_pct || ep.trailing_activate_pct) ? ep : null
       })(),
     }),
     onSuccess: (data) => {
@@ -145,6 +149,18 @@ function BacktestList() {
                 />
               </div>
               <div>
+                <label className="text-xs text-gray-400">Stop Loss $ (absolute)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="e.g. 500 for $500 loss"
+                  value={exitPolicy.stop_loss_abs}
+                  onChange={e => setExitPolicy(p => ({ ...p, stop_loss_abs: e.target.value }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
+                />
+              </div>
+              <div>
                 <label className="text-xs text-gray-400">Take Profit %</label>
                 <input
                   type="number"
@@ -153,6 +169,18 @@ function BacktestList() {
                   placeholder="e.g. 15 for 15%"
                   value={exitPolicy.take_profit_pct}
                   onChange={e => setExitPolicy(p => ({ ...p, take_profit_pct: e.target.value }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400">Take Profit $ (absolute)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="1"
+                  placeholder="e.g. 2000 for $2000 gain"
+                  value={exitPolicy.take_profit_abs}
+                  onChange={e => setExitPolicy(p => ({ ...p, take_profit_abs: e.target.value }))}
                   className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
                 />
               </div>
