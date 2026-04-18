@@ -1,5 +1,5 @@
 from __future__ import annotations
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, model_validator, field_validator
 from typing import Literal
 
 
@@ -11,6 +11,20 @@ class ExitPolicy(BaseModel):
     trailing_stop_pct: float | None = None
     trailing_activate_pct: float | None = None
     price_check_mode: Literal["close", "ohlc"] = "close"
+
+    @field_validator("stop_loss_pct", "take_profit_pct", "trailing_stop_pct", "trailing_activate_pct", mode="after")
+    @classmethod
+    def _positive_pct(cls, v: float | None) -> float | None:
+        if v is not None and v <= 0:
+            raise ValueError("percentage fields must be > 0")
+        return v
+
+    @field_validator("stop_loss_abs", "take_profit_abs", mode="after")
+    @classmethod
+    def _positive_abs(cls, v: float | None) -> float | None:
+        if v is not None and v <= 0:
+            raise ValueError("absolute fields must be > 0")
+        return v
 
     @model_validator(mode="after")
     def _validate(self) -> ExitPolicy:
