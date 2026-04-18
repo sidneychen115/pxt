@@ -1,5 +1,5 @@
 import client from './client'
-import type { Backtest, BacktestTrade, EquityPoint } from '../types'
+import type { Backtest, BacktestTrade, EquityPoint, ExitPolicy } from '../types'
 
 export const fetchBacktests = (strategy_id?: string) =>
   client.get<Backtest[]>('/backtests', { params: { strategy_id } }).then(r => r.data)
@@ -14,6 +14,7 @@ export const triggerBacktest = (data: {
   symbols: string[]
   initial_capital: number
   parameters: Record<string, unknown>
+  exit_policy?: ExitPolicy | null
 }) => client.post<{ id: number; status: string }>('/backtests', data).then(r => r.data)
 
 export const fetchBacktestTrades = (id: number, sort_by = 'entry_time', order = 'asc') =>

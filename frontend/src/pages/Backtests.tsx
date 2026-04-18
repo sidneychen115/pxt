@@ -32,6 +32,13 @@ function BacktestList() {
     symbols: '',
     initial_capital: 100000,
   })
+  const [exitPolicy, setExitPolicy] = useState({
+    stop_loss_pct: '',
+    take_profit_pct: '',
+    trailing_stop_pct: '',
+    trailing_activate_pct: '',
+    price_check_mode: 'close' as 'close' | 'ohlc',
+  })
 
   const triggerMutation = useMutation({
     mutationFn: () => triggerBacktest({
@@ -41,6 +48,16 @@ function BacktestList() {
       symbols: form.symbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean),
       initial_capital: form.initial_capital,
       parameters: {},
+      exit_policy: (() => {
+        const ep = {
+          stop_loss_pct: exitPolicy.stop_loss_pct ? parseFloat(exitPolicy.stop_loss_pct) / 100 : null,
+          take_profit_pct: exitPolicy.take_profit_pct ? parseFloat(exitPolicy.take_profit_pct) / 100 : null,
+          trailing_stop_pct: exitPolicy.trailing_stop_pct ? parseFloat(exitPolicy.trailing_stop_pct) / 100 : null,
+          trailing_activate_pct: exitPolicy.trailing_activate_pct ? parseFloat(exitPolicy.trailing_activate_pct) / 100 : null,
+          price_check_mode: exitPolicy.price_check_mode,
+        }
+        return (ep.stop_loss_pct || ep.take_profit_pct || ep.trailing_stop_pct) ? ep : null
+      })(),
     }),
     onSuccess: (data) => {
       setShowForm(false)
@@ -112,6 +129,70 @@ function BacktestList() {
               />
             </div>
           </div>
+          <details className="border border-gray-700 rounded p-3">
+            <summary className="text-sm text-gray-400 cursor-pointer select-none">Exit Rules (optional)</summary>
+            <div className="grid grid-cols-2 gap-4 mt-3">
+              <div>
+                <label className="text-xs text-gray-400">Stop Loss %</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  placeholder="e.g. 5 for 5%"
+                  value={exitPolicy.stop_loss_pct}
+                  onChange={e => setExitPolicy(p => ({ ...p, stop_loss_pct: e.target.value }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400">Take Profit %</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  placeholder="e.g. 15 for 15%"
+                  value={exitPolicy.take_profit_pct}
+                  onChange={e => setExitPolicy(p => ({ ...p, take_profit_pct: e.target.value }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400">Trailing Stop %</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  placeholder="e.g. 5 for 5%"
+                  value={exitPolicy.trailing_stop_pct}
+                  onChange={e => setExitPolicy(p => ({ ...p, trailing_stop_pct: e.target.value }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400">Trailing Activate % (optional)</label>
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  placeholder="e.g. 10 to activate after 10% gain"
+                  value={exitPolicy.trailing_activate_pct}
+                  onChange={e => setExitPolicy(p => ({ ...p, trailing_activate_pct: e.target.value }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-400">Price Check Mode</label>
+                <select
+                  value={exitPolicy.price_check_mode}
+                  onChange={e => setExitPolicy(p => ({ ...p, price_check_mode: e.target.value as 'close' | 'ohlc' }))}
+                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
+                >
+                  <option value="close">Close (fill at next open)</option>
+                  <option value="ohlc">OHLC (intrabar fill at trigger price)</option>
+                </select>
+              </div>
+            </div>
+          </details>
           <div className="flex gap-2">
             <button onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200">
               Cancel

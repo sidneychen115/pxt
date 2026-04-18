@@ -27,6 +27,16 @@ export interface Signal {
   created_at: string
 }
 
+export interface ExitPolicy {
+  stop_loss_pct?: number | null
+  stop_loss_abs?: number | null
+  take_profit_pct?: number | null
+  take_profit_abs?: number | null
+  trailing_stop_pct?: number | null
+  trailing_activate_pct?: number | null
+  price_check_mode?: 'close' | 'ohlc'
+}
+
 export interface Backtest {
   id: number
   strategy_id: string
@@ -47,6 +57,7 @@ export interface Backtest {
   llm_model: string | null
   created_at: string
   completed_at: string | null
+  exit_policy?: ExitPolicy | null
 }
 
 export interface BacktestTrade {
