@@ -51,8 +51,8 @@ class PivotSupertrendStrategy(BaseStrategy):
         prd    = int(parameters.get("pivot_period", self.default_parameters["pivot_period"]))
         factor = float(parameters.get("atr_factor",   self.default_parameters["atr_factor"]))
         atr_pd = int(parameters.get("atr_period",   self.default_parameters["atr_period"]))
-        limit  = 200
-        min_bars = atr_pd + prd * 2 + 1
+        limit  = max(prd * 2 + atr_pd + 20, 200)
+        min_bars = prd * 2 + atr_pd + 1
         signals: list[TradeSignal] = []
 
         for symbol in symbols:
