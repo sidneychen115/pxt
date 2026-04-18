@@ -46,7 +46,7 @@ async def trigger_backtest(
         symbols=req.symbols,
         initial_capital=req.initial_capital,
         parameters=req.parameters,
-        exit_policy=req.exit_policy.model_dump() if req.exit_policy else None,
+        exit_policy=req.exit_policy.model_dump(mode="json") if req.exit_policy else None,
         status="running",
     )
     session.add(bt)
