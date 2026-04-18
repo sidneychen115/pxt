@@ -56,7 +56,7 @@ function BacktestList() {
           trailing_activate_pct: exitPolicy.trailing_activate_pct ? parseFloat(exitPolicy.trailing_activate_pct) / 100 : null,
           price_check_mode: exitPolicy.price_check_mode,
         }
-        return (ep.stop_loss_pct || ep.take_profit_pct || ep.trailing_stop_pct) ? ep : null
+        return (ep.stop_loss_pct || ep.take_profit_pct || ep.trailing_stop_pct || ep.trailing_activate_pct) ? ep : null
       })(),
     }),
     onSuccess: (data) => {
@@ -381,7 +381,7 @@ function BacktestDetail({ id }: { id: number }) {
                       {t.pnl_pct != null ? `${(t.pnl_pct * 100).toFixed(2)}%` : '—'}
                     </td>
                     <td className="px-4 py-2 text-right text-gray-400">{t.hold_days?.toFixed(0) ?? '—'}</td>
-                    <td className="px-4 py-2 text-xs text-gray-500">{t.exit_reason}</td>
+                    <td className="px-4 py-2 text-xs text-gray-500">{t.exit_reason ?? '—'}</td>
                   </tr>
                 ))}
               </tbody>
