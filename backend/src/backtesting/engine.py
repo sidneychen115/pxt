@@ -1,4 +1,3 @@
-import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import pandas as pd
@@ -45,6 +44,8 @@ class BacktestEngine:
 
         cash = self._capital
         positions: dict[str, _PositionState] = {}
+        # Invariant: a sym in pending_close_exits must NOT also be in positions.
+        # Always call positions.pop(sym) when moving a state here.
         pending_close_exits: dict[str, tuple[str, _PositionState]] = {}
         closed_trades: list[TradeRecord] = []
         equity_series: dict[datetime, float] = {}
