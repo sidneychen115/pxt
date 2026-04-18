@@ -51,8 +51,8 @@ class PivotSupertrendStrategy(BaseStrategy):
         prd    = int(parameters.get("pivot_period", self.default_parameters["pivot_period"]))
         factor = float(parameters.get("atr_factor",   self.default_parameters["atr_factor"]))
         atr_pd = int(parameters.get("atr_period",   self.default_parameters["atr_period"]))
-        limit  = max(prd * 2 + atr_pd + 20, 200)
-        min_bars = prd * 2 + atr_pd + 1
+        limit    = max(prd * 2 + atr_pd + 20, 200)  # 200-bar floor gives trailing stops history to stabilize
+        min_bars = prd * 2 + atr_pd + 1             # minimum bars needed for one valid ATR + pivot cycle
         signals: list[TradeSignal] = []
 
         for symbol in symbols:
