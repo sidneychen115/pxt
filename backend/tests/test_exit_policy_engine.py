@@ -180,3 +180,70 @@ async def test_take_profit_ohlc():
     trade = metrics.trades[0]
     assert trade.exit_reason == "take_profit"
     assert trade.exit_price == pytest.approx(115.0)
+
+
+async def test_trailing_stop_immediate():
+    # trailing_stop_pct=0.05, no activation threshold → active from entry.
+    # Buy at t1 open=100. peak starts at 100.
+    # t1: close=110 → peak=110, trail=104.5; close=110 > 104.5 → hold
+    # t2: close=108 → peak still 110, trail=104.5; close=108 > 104.5 → hold
+    # t3: close=104 → close=104 < 104.5 → TS queued; fill at t4 open=103
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 111, 99, 110),   # t1: buy at 100; peak=110
+        (110, 112, 107, 108),  # t2: peak=110, trail=104.5; hold
+        (108, 109, 103, 104),  # t3: close=104 < 104.5 → TS queued
+        (103, 104, 102, 103),  # t4: fill at open=103
+    ])
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(trailing_stop_pct=0.05),
+    )
+    metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "trailing_stop"
+    assert trade.exit_price == pytest.approx(103.0)
+
+
+async def test_trailing_stop_ohlc():
+    # trailing_stop_pct=0.05, ohlc mode. peak updates on bar high.
+    # Buy at t1 open=100.
+    # t1: high=115 → peak=115, trail=109.25; low=110 > 109.25 → hold
+    # t2: high=116 → peak=116, trail=110.2; low=108 < 110.2 → TS at 110.2
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 115, 110, 113),  # t1: buy at 100; peak=115, trail=109.25; low=110 > 109.25 → hold
+        (113, 116, 108, 111),  # t2: peak=116, trail=110.2; low=108 < 110.2 → TS at 110.2
+        (108, 109, 107, 108),
+    ])
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(trailing_stop_pct=0.05, price_check_mode="ohlc"),
+    )
+    metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "trailing_stop"
+    assert trade.exit_price == pytest.approx(116 * 0.95)  # 110.2
+
+
+async def test_trailing_stop_with_activate():
+    # trailing_stop_pct=0.05, trailing_activate_pct=0.10 → activates when price >= 110.
+    # Buy at t1 open=100.
+    # t1: close=105 < 110 → not active, peak=105
+    # t2: close=112 >= 110 → active, peak=112, trail=106.4; close=112 > 106.4 → hold
+    # t3: close=106 < 106.4 → TS queued; fill at t4 open=105
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 106, 99, 105),   # t1: buy at 100; peak=105 < 110 → not active
+        (105, 113, 104, 112),  # t2: peak=112 >= 110 → active; trail=106.4; hold
+        (112, 113, 105, 106),  # t3: close=106 < 106.4 → TS queued
+        (105, 106, 104, 105),  # t4: fill at open=105
+    ])
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(trailing_stop_pct=0.05, trailing_activate_pct=0.10),
+    )
+    metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "trailing_stop"
+    assert trade.exit_price == pytest.approx(105.0)

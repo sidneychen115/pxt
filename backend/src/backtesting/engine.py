@@ -42,12 +42,24 @@ class BacktestEngine:
         return None
 
     def _update_state(self, state: _PositionState, bar: pd.Series) -> None:
-        """Update peak_price (trailing activation added in Task 5)."""
+        """Update peak_price and check trailing stop activation."""
         ep = self._exit_policy
         if ep is None:
             return
         check_price = float(bar["high"]) if ep.price_check_mode == "ohlc" else float(bar["close"])
         state.peak_price = max(state.peak_price, check_price)
+
+        if ep.trailing_stop_pct is not None and not state.trailing_active:
+            if state.take_profit_price is not None:
+                # TP price acts as trailing activation threshold (handled in Task 6)
+                if state.peak_price >= state.take_profit_price:
+                    state.trailing_active = True
+            elif ep.trailing_activate_pct is not None:
+                if state.peak_price >= state.trade.entry_price * (1 + ep.trailing_activate_pct):
+                    state.trailing_active = True
+            else:
+                # No activation threshold → active immediately
+                state.trailing_active = True
 
     def _check_exit(self, state: _PositionState, bar: pd.Series) -> str | None:
         """Return exit reason if position should exit this bar, else None."""
@@ -60,8 +72,12 @@ class BacktestEngine:
             # Priority 1: stop loss
             if state.stop_price is not None and low <= state.stop_price:
                 return "stop_loss"
-            # Priority 2: trailing stop — added in Task 5
-            # Priority 3: fixed take profit (only if trailing not active)
+            # Priority 2: trailing stop (when active)
+            if state.trailing_active and ep.trailing_stop_pct is not None:
+                trail_price = state.peak_price * (1 - ep.trailing_stop_pct)
+                if low <= trail_price:
+                    return "trailing_stop"
+            # Priority 3: fixed take profit (only if trailing not yet active)
             if not state.trailing_active and state.take_profit_price is not None:
                 if high >= state.take_profit_price:
                     return "take_profit"
@@ -69,6 +85,10 @@ class BacktestEngine:
             close = float(bar["close"])
             if state.stop_price is not None and close <= state.stop_price:
                 return "stop_loss"
+            if state.trailing_active and ep.trailing_stop_pct is not None:
+                trail_price = state.peak_price * (1 - ep.trailing_stop_pct)
+                if close <= trail_price:
+                    return "trailing_stop"
             if not state.trailing_active and state.take_profit_price is not None:
                 if close >= state.take_profit_price:
                     return "take_profit"
