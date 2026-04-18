@@ -56,12 +56,22 @@ class BacktestEngine:
             return None
         if ep.price_check_mode == "ohlc":
             low = float(bar["low"])
+            high = float(bar["high"])
+            # Priority 1: stop loss
             if state.stop_price is not None and low <= state.stop_price:
                 return "stop_loss"
+            # Priority 2: trailing stop — added in Task 5
+            # Priority 3: fixed take profit (only if trailing not active)
+            if not state.trailing_active and state.take_profit_price is not None:
+                if high >= state.take_profit_price:
+                    return "take_profit"
         else:
             close = float(bar["close"])
             if state.stop_price is not None and close <= state.stop_price:
                 return "stop_loss"
+            if not state.trailing_active and state.take_profit_price is not None:
+                if close >= state.take_profit_price:
+                    return "take_profit"
         return None
 
     def _ohlc_fill_price(self, state: _PositionState, reason: str) -> float:
@@ -200,16 +210,17 @@ class BacktestEngine:
                         portfolio_value += state.trade.quantity * float(past["close"].iloc[-1])
             equity_series[current_time] = portfolio_value
 
-        # Settle any pending close-mode exits at last bar's close
+        # Settle any pending close-mode exits at last bar's open
         last_time = all_times[-1]
         for sym, (reason, state) in list(pending_close_exits.items()):
             bar_df = data.get(sym, {}).get(timeframe)
             if bar_df is not None and not bar_df.empty:
-                last_price = float(bar_df["close"].iloc[-1])
+                last_bar = bar_df[bar_df.index == last_time]
+                fill_price = float(last_bar["open"].iloc[0]) if not last_bar.empty else float(bar_df["close"].iloc[-1])
                 state.trade.exit_time = last_time
-                state.trade.exit_price = last_price
+                state.trade.exit_price = fill_price
                 state.trade.exit_reason = reason
-                cash += state.trade.quantity * last_price
+                cash += state.trade.quantity * fill_price
                 closed_trades.append(state.trade)
 
         # Close open positions at last bar's close

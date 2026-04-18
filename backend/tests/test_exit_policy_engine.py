@@ -111,3 +111,72 @@ async def test_no_policy_behavior_unchanged():
     engine = BacktestEngine(initial_capital=10_000)
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     assert metrics.trades[0].exit_reason == "end_of_backtest"
+
+
+async def test_take_profit_pct_close():
+    # Buy at t1 open=100. TP=15% → tp=115.
+    # t2: close=116 >= 115 → TP queued. t3: fill at open=117.
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 102, 99, 101),   # t1: buy at 100; close=101 < 115 → hold
+        (101, 120, 100, 116),  # t2: close=116 >= 115 → TP queued
+        (117, 120, 116, 118),  # t3: fill at open=117
+    ])
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(take_profit_pct=0.15),
+    )
+    metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "take_profit"
+    assert trade.exit_price == pytest.approx(117.0)
+
+
+async def test_take_profit_abs_close():
+    # Buy 10 shares at 100 = $1000. TP abs=$200 → tp=100+200/10=120.
+    # t2: close=121 >= 120 → TP queued. t3: fill at open=122.
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 102, 99, 101),
+        (101, 125, 100, 121),
+        (122, 125, 120, 123),
+    ])
+
+    class _BuyFixedQtyStrategy2(BaseStrategy):
+        name = "_test_fixed_qty2"
+        def __init__(self):
+            self._bought = False
+        async def generate_signals(self, symbols, parameters, ctx):
+            sym = symbols[0]
+            bars = await ctx.get_bars(sym, "1d")
+            if len(bars) == 0 and not self._bought:
+                self._bought = True
+                return [TradeSignal(symbol=sym, direction="buy", order_type="market", reasoning="test", quantity=10)]
+            return []
+
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(take_profit_abs=200.0),
+    )
+    metrics = await engine.run(_BuyFixedQtyStrategy2(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "take_profit"
+    assert trade.exit_price == pytest.approx(122.0)
+
+
+async def test_take_profit_ohlc():
+    # Buy at t1 open=100. TP=15% → tp=115. t2: high=116 >= 115 → fill at 115 exactly.
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 102, 99, 101),   # t1: buy at 100
+        (101, 116, 100, 112),  # t2: high=116 >= 115 → fill at 115
+        (112, 113, 111, 112),  # t3: not reached
+    ])
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(take_profit_pct=0.15, price_check_mode="ohlc"),
+    )
+    metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "take_profit"
+    assert trade.exit_price == pytest.approx(115.0)
