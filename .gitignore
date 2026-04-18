@@ -15,3 +15,5 @@ schwab_token.json
 htmlcov/
 logs/
 *.log
+strategy_input_raw/
+.cursor/

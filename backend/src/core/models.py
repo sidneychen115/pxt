@@ -155,6 +155,8 @@ class Backtest(Base):
     llm_evaluation: Mapped[str | None] = mapped_column(Text)
     llm_model: Mapped[str | None] = mapped_column(String(50))
     error_message: Mapped[str | None] = mapped_column(Text)
+    progress_phase: Mapped[str | None] = mapped_column(String(32))
+    progress_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     exit_policy: Mapped[dict | None] = mapped_column(JSONB)

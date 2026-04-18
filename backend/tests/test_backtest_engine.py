@@ -3,7 +3,27 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 from src.backtesting.engine import BacktestEngine
+from src.backtesting.exit_policy import ExitPolicy
+from src.strategies.base import BaseStrategy, TradeSignal
 from src.strategies.library.ma_crossover import MovingAverageCrossover
+
+
+class _BuyThenSellStrategy(BaseStrategy):
+    """First signal day: buy; thereafter: sell (for testing disable_sell_signal)."""
+
+    id = "test_buy_then_sell"
+    name = "Test Buy Then Sell"
+    _bought: bool = False
+
+    async def generate_signals(self, symbols, parameters, ctx):
+        sym = symbols[0]
+        bars = await ctx.get_bars(sym, "1d", limit=500)
+        if len(bars) < 2:
+            return []
+        if not self._bought:
+            self._bought = True
+            return [TradeSignal(sym, "buy", "market", quantity=10)]
+        return [TradeSignal(sym, "sell", "market", quantity=10)]
 
 
 def make_trending_data(symbol="SPY", n=60, trend="up"):
@@ -54,6 +74,26 @@ async def test_look_ahead_prevention():
     result = await ctx.get_bars("SPY", "1d", limit=200)
     assert len(result) == 4
     assert all(result.index < cutoff)
+
+
+async def test_disable_sell_signal_skips_strategy_sell():
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(disable_sell_signal=True),
+    )
+    strategy = _BuyThenSellStrategy()
+    data = make_trending_data("SPY", 30, "up")
+    metrics = await engine.run(strategy, ["SPY"], {}, data, "1d")
+    assert len(metrics.trades) >= 1
+    assert all(t.exit_reason != "signal" for t in metrics.trades)
+
+
+async def test_sell_signal_closes_without_disable():
+    engine = BacktestEngine(initial_capital=10_000, exit_policy=None)
+    strategy = _BuyThenSellStrategy()
+    data = make_trending_data("SPY", 30, "up")
+    metrics = await engine.run(strategy, ["SPY"], {}, data, "1d")
+    assert any(t.exit_reason == "signal" for t in metrics.trades)
 
 
 async def test_profit_factor_no_losers():

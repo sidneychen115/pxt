@@ -5,6 +5,7 @@ from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session, async_session_factory
 from src.core.models import Backtest, BacktestTrade, BacktestEquityCurve
+from src.api.websocket import ws_manager
 from src.backtesting.exit_policy import ExitPolicy
 
 router = APIRouter()
@@ -131,8 +132,26 @@ def _backtest_summary(bt: Backtest) -> dict:
         "llm_evaluation": bt.llm_evaluation,
         "llm_model": bt.llm_model,
         "created_at": bt.created_at, "completed_at": bt.completed_at,
+        "parameters": bt.parameters or {},
         "exit_policy": bt.exit_policy,
+        "progress_phase": bt.progress_phase,
+        "progress_message": bt.progress_message,
     }
+
+
+async def _set_backtest_progress(backtest_id: int, phase: str, message: str | None = None) -> None:
+    async with async_session_factory() as session:
+        await session.execute(
+            update(Backtest).where(Backtest.id == backtest_id).values(
+                progress_phase=phase,
+                progress_message=message,
+            )
+        )
+        await session.commit()
+    await ws_manager.broadcast(
+        "backtest_progress",
+        {"backtest_id": backtest_id, "phase": phase, "message": message},
+    )
 
 
 async def _fetch_with_cache(sym: str, timeframe: str, start: datetime, end: datetime) -> "pd.DataFrame":
@@ -192,20 +211,38 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
         start = datetime(req.start_date.year, req.start_date.month, req.start_date.day, tzinfo=timezone.utc)
         end = datetime(req.end_date.year, req.end_date.month, req.end_date.day, tzinfo=timezone.utc)
         data: dict = {}
-        for sym in req.symbols:
+        n_sym = len(req.symbols)
+        await _set_backtest_progress(
+            backtest_id,
+            "fetching_data",
+            f"拉取行情数据 (0/{n_sym})" if n_sym else "拉取行情数据",
+        )
+        for i, sym in enumerate(req.symbols, start=1):
+            await _set_backtest_progress(
+                backtest_id,
+                "fetching_data",
+                f"拉取行情数据: {sym} ({i}/{n_sym})",
+            )
             df = await _fetch_with_cache(sym, "1d", start, end)
             if not df.empty:
                 data[sym] = {"1d": df}
         if not data:
             raise ValueError("No data fetched for any symbol.")
+        await _set_backtest_progress(backtest_id, "engine", "回测引擎计算中…")
         strategy = REGISTRY[req.strategy_id]()
         engine = BacktestEngine(
             initial_capital=req.initial_capital,
             exit_policy=req.exit_policy,
         )
         metrics = await engine.run(strategy, req.symbols, req.parameters, data, "1d")
-        evaluator = LLMEvaluator()
-        llm_text, llm_model = await evaluator.evaluate(metrics, strategy.name, strategy.description)
+        llm_text, llm_model = None, None
+        await _set_backtest_progress(backtest_id, "llm_eval", "LLM 策略评估中…")
+        try:
+            evaluator = LLMEvaluator()
+            llm_text, llm_model = await evaluator.evaluate(metrics, strategy.name, strategy.description)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning("LLM evaluation skipped (no API key or provider error)")
         async with async_session_factory() as session:
             for t in metrics.trades:
                 session.add(BacktestTrade(
@@ -241,16 +278,29 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                     llm_evaluation=llm_text,
                     llm_model=llm_model,
                     completed_at=datetime.now(timezone.utc),
+                    progress_phase=None,
+                    progress_message=None,
                 )
             )
             await session.commit()
+        await ws_manager.broadcast(
+            "backtest_progress",
+            {"backtest_id": backtest_id, "phase": None, "message": None, "status": "completed"},
+        )
     except Exception as e:
         import logging
         logging.getLogger(__name__).exception("Backtest %d failed", backtest_id)
         async with async_session_factory() as session:
             await session.execute(
                 update(Backtest).where(Backtest.id == backtest_id).values(
-                    status="failed", error_message=str(e)
+                    status="failed",
+                    error_message=str(e),
+                    progress_phase=None,
+                    progress_message=None,
                 )
             )
             await session.commit()
+        await ws_manager.broadcast(
+            "backtest_progress",
+            {"backtest_id": backtest_id, "phase": None, "message": None, "status": "failed"},
+        )

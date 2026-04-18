@@ -11,6 +11,8 @@ class ExitPolicy(BaseModel):
     trailing_stop_pct: float | None = None
     trailing_activate_pct: float | None = None
     price_check_mode: Literal["close", "ohlc"] = "close"
+    # When True, strategy SELL signals are ignored; exits only via exit rules or end of backtest.
+    disable_sell_signal: bool = False
 
     @field_validator("stop_loss_pct", "take_profit_pct", "trailing_stop_pct", "trailing_activate_pct", mode="after")
     @classmethod

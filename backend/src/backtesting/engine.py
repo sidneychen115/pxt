@@ -213,6 +213,8 @@ class BacktestEngine:
                             take_profit_price=self._compute_tp_price(fill_price, qty),
                         )
                 elif sig.direction == "sell" and sym in positions:
+                    if self._exit_policy and self._exit_policy.disable_sell_signal:
+                        continue
                     state = positions.pop(sym)
                     state.trade.exit_time = fill_time
                     state.trade.exit_price = fill_price

@@ -35,7 +35,12 @@ export interface ExitPolicy {
   trailing_stop_pct?: number | null
   trailing_activate_pct?: number | null
   price_check_mode?: 'close' | 'ohlc'
+  /** When true, ignore strategy SELL signals (exits only via exit rules or end of test). */
+  disable_sell_signal?: boolean
 }
+
+/** Backtest pipeline step; null when idle or after completion. */
+export type BacktestProgressPhase = 'fetching_data' | 'engine' | 'llm_eval'
 
 export interface Backtest {
   id: number
@@ -45,6 +50,10 @@ export interface Backtest {
   symbols: string[]
   initial_capital: number
   status: 'running' | 'completed' | 'failed'
+  /** Current pipeline step while status is running */
+  progress_phase?: BacktestProgressPhase | null
+  /** Human-readable detail, e.g. symbol (2/5) */
+  progress_message?: string | null
   total_return: number | null
   annualized_return: number | null
   sharpe_ratio: number | null
@@ -57,6 +66,8 @@ export interface Backtest {
   llm_model: string | null
   created_at: string
   completed_at: string | null
+  /** Strategy parameters snapshot from when the backtest was created */
+  parameters?: Record<string, unknown>
   exit_policy?: ExitPolicy | null
 }
 

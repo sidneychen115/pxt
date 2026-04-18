@@ -22,6 +22,12 @@ def test_all_none_is_valid():
     assert policy.stop_loss_pct is None
     assert policy.trailing_stop_pct is None
     assert policy.price_check_mode == "close"
+    assert policy.disable_sell_signal is False
+
+
+def test_disable_sell_signal_only():
+    policy = ExitPolicy(disable_sell_signal=True)
+    assert policy.disable_sell_signal is True
 
 
 def test_valid_combined_policy():
