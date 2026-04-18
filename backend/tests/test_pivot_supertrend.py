@@ -90,13 +90,12 @@ def make_bullish_flip_df() -> pd.DataFrame:
     """Price series that ends with a bullish SuperTrend flip.
 
     Phase 1 (bars 0-4): oscillation creates a pivot high at bar 2
-    (high=153), confirmed at bar 4.  Center line initialised to ~153.
+    (high=153), confirmed at bar 4.  Center line locked at 153.0.
 
     Phase 2 (bars 5-39): steady decline 100→50.  No new pivots.
-    Center stays at ~153; bands are ~153±6.  TDown ratchets near 159.
-    Close stays below TUp (~147) → Trend = -1.
+    ATR≈13.3; ratcheted TDown≈163; close stays below TUp≈140 → Trend = -1.
 
-    Phase 3 (bar 40): close=200, crosses above TDown (~159) → Trend flips to 1.
+    Phase 3 (bar 40): close=200, crosses above TDown (~163) → Trend flips to 1.
     """
     phase1_close = [100.0, 120.0, 150.0, 120.0, 100.0]
     phase2_close = list(np.linspace(100.0, 50.0, 35))
@@ -116,17 +115,16 @@ def make_bearish_flip_df() -> pd.DataFrame:
     """Price series that ends with a bearish SuperTrend flip.
 
     Phase 1 (bars 0-4): oscillation creates a pivot low at bar 2
-    (low=49), confirmed at bar 4.  Center line initialised to ~49.
+    (low=49), confirmed at bar 4.  Center line locked at 49.0.
 
     Phase 2 (bars 5-39): steady rise 100→150.  No new pivots.
-    Center stays at ~49; bands are ~49±6.  TUp ratchets near 43.
-    Close stays above TDown (~55) → Trend = 1.
+    ATR≈13.1; ratcheted TUp≈31.5; close stays above TDown≈63 → Trend = 1.
 
-    Phase 3 (bar 40): close=30, crosses below TUp (~43) → Trend flips to -1.
+    Phase 3 (bar 40): close=20, crosses below TUp (~31.5) → Trend flips to -1.
     """
     phase1_close = [100.0, 80.0, 50.0, 80.0, 100.0]
     phase2_close = list(np.linspace(100.0, 150.0, 35))
-    phase3_close = [30.0]
+    phase3_close = [20.0]
     prices = phase1_close + phase2_close + phase3_close
     n = len(prices)
     return pd.DataFrame({
@@ -159,6 +157,8 @@ async def test_bearish_flip_generates_sell(strategy):
     assert len(signals) == 1
     assert signals[0].direction == "sell"
     assert signals[0].symbol == "SPY"
+    assert signals[0].order_type == "market"
+    assert 0.0 < signals[0].confidence <= 1.0
 
 
 async def test_no_signal_on_flat_price(strategy):
