@@ -5,6 +5,7 @@ from sqlalchemy import select, desc, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session, async_session_factory
 from src.core.models import Backtest, BacktestTrade, BacktestEquityCurve
+from src.backtesting.exit_policy import ExitPolicy
 
 router = APIRouter()
 
@@ -16,6 +17,7 @@ class BacktestRequest(BaseModel):
     symbols: list[str]
     initial_capital: float = 100_000.0
     parameters: dict = {}
+    exit_policy: ExitPolicy | None = None
 
 
 @router.get("/")
@@ -44,6 +46,7 @@ async def trigger_backtest(
         symbols=req.symbols,
         initial_capital=req.initial_capital,
         parameters=req.parameters,
+        exit_policy=req.exit_policy.model_dump() if req.exit_policy else None,
         status="running",
     )
     session.add(bt)
@@ -128,6 +131,7 @@ def _backtest_summary(bt: Backtest) -> dict:
         "llm_evaluation": bt.llm_evaluation,
         "llm_model": bt.llm_model,
         "created_at": bt.created_at, "completed_at": bt.completed_at,
+        "exit_policy": bt.exit_policy,
     }
 
 
@@ -195,7 +199,10 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
         if not data:
             raise ValueError("No data fetched for any symbol.")
         strategy = REGISTRY[req.strategy_id]()
-        engine = BacktestEngine(initial_capital=req.initial_capital)
+        engine = BacktestEngine(
+            initial_capital=req.initial_capital,
+            exit_policy=req.exit_policy,
+        )
         metrics = await engine.run(strategy, req.symbols, req.parameters, data, "1d")
         evaluator = LLMEvaluator()
         llm_text, llm_model = await evaluator.evaluate(metrics, strategy.name, strategy.description)
