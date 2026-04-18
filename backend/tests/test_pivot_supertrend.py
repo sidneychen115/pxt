@@ -26,6 +26,9 @@ def test_pivot_high_confirmed_at_correct_bar():
     high = pd.Series([100.0, 102.0, 153.0, 102.0, 100.0, 100.0, 100.0])
     low  = pd.Series([ 90.0,  91.0,  92.0,  91.0,  90.0,  90.0,  90.0])
     ph, _ = _detect_pivots(high, low, prd=2)
+    assert pd.isna(ph.iloc[0]), "no pivot before confirmation window"
+    assert pd.isna(ph.iloc[1]), "no pivot before confirmation window"
+    assert pd.isna(ph.iloc[2]), "no pivot before confirmation window"
     assert pd.isna(ph.iloc[3]), "pivot not yet confirmed at j=3"
     assert ph.iloc[4] == 153.0, "pivot high must be confirmed at j=4"
     assert pd.isna(ph.iloc[5]), "no second pivot expected"
@@ -36,9 +39,13 @@ def test_pivot_low_confirmed_at_correct_bar():
     high = pd.Series([110.0] * 7)
     low  = pd.Series([100.0, 98.0, 50.0, 98.0, 100.0, 100.0, 100.0])
     _, pl = _detect_pivots(high, low, prd=2)
+    assert pd.isna(pl.iloc[0]), "no pivot before confirmation window"
+    assert pd.isna(pl.iloc[1]), "no pivot before confirmation window"
+    assert pd.isna(pl.iloc[2]), "no pivot before confirmation window"
     assert pd.isna(pl.iloc[3])
     assert pl.iloc[4] == 50.0
     assert pd.isna(pl.iloc[5])
+    assert pd.isna(pl.iloc[6])
 
 
 def test_no_pivot_in_monotonic_series():
