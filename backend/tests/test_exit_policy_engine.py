@@ -247,3 +247,64 @@ async def test_trailing_stop_with_activate():
     trade = metrics.trades[0]
     assert trade.exit_reason == "trailing_stop"
     assert trade.exit_price == pytest.approx(105.0)
+
+
+async def test_tp_activates_trailing():
+    # take_profit_pct=0.15 (tp=115), trailing_stop_pct=0.05.
+    # TP price (115) acts as trailing activation; no fixed TP exit.
+    # Buy at t1 open=100.
+    # t1: close=116 >= 115 → trailing activates; peak=116, trail=110.2; hold (no fixed TP exit)
+    # t2: close=111 → peak=116, trail=110.2; close=111 > 110.2 → hold
+    # t3: close=109 < 110.2 → TS queued; fill at t4 open=108
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 117, 99, 116),   # t1: buy at 100; close=116 >= 115 → trailing activates
+        (116, 118, 110, 111),  # t2: close=111 > 110.2 → hold
+        (111, 112, 108, 109),  # t3: close=109 < 110.2 → TS queued
+        (108, 109, 107, 108),  # t4: fill at open=108
+    ])
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(take_profit_pct=0.15, trailing_stop_pct=0.05),
+    )
+    metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    assert len(metrics.trades) == 1
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "trailing_stop"
+    assert trade.exit_price == pytest.approx(108.0)
+    assert trade.entry_price == pytest.approx(100.0)
+
+
+async def test_policy_beats_signal_same_bar():
+    # SL and strategy sell both triggered at t2 (close mode). Policy runs first → SL wins.
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 102, 99, 101),   # t1: buy fills at 100
+        (101, 102, 90, 93),    # t2: close=93 < 95 (SL 5%) → SL queued; sell signal also fires
+        (92,  92,  92, 92),    # t3: SL fills at open=92
+    ])
+
+    class _BuyThenSellAt2(BaseStrategy):
+        name = "_test_buy_sell_at2"
+        def __init__(self):
+            self._bought = False
+        async def generate_signals(self, symbols, parameters, ctx):
+            sym = symbols[0]
+            bars_data = await ctx.get_bars(sym, "1d")
+            n = len(bars_data)
+            sigs = []
+            if n == 0 and not self._bought:
+                self._bought = True
+                sigs.append(TradeSignal(symbol=sym, direction="buy", order_type="market", reasoning="test"))
+            if n == 2:
+                sigs.append(TradeSignal(symbol=sym, direction="sell", order_type="market", reasoning="test sell"))
+            return sigs
+
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(stop_loss_pct=0.05),
+    )
+    metrics = await engine.run(_BuyThenSellAt2(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    assert len(metrics.trades) == 1
+    assert metrics.trades[0].exit_reason == "stop_loss"
+    assert metrics.trades[0].exit_price == pytest.approx(92.0)
