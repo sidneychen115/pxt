@@ -73,7 +73,7 @@ async def get_backtest_trades(
     order: str = "asc",
     session: AsyncSession = Depends(get_session),
 ):
-    _ALLOWED_SORT = {"entry_time", "exit_time", "pnl", "pnl_pct", "symbol"}
+    _ALLOWED_SORT = {"entry_time", "exit_time", "pnl", "pnl_pct", "symbol", "hold_days"}
     col_name = sort_by if sort_by in _ALLOWED_SORT else "entry_time"
     col = getattr(BacktestTrade, col_name)
     direction = col.asc() if order == "asc" else col.desc()

@@ -5,6 +5,7 @@ def test_discover_finds_ma_crossover():
     REGISTRY.clear()
     discover_strategies()
     assert "ma_crossover" in REGISTRY
+    assert "adaptive_turtle" in REGISTRY
 
 
 def test_get_strategy_returns_instance():

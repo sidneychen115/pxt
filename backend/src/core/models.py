@@ -208,6 +208,25 @@ class BacktestEquityCurve(Base):
     )
 
 
+class BacktestConfigPreset(Base):
+    """Saved backtest form configuration (server-side; replaces browser localStorage)."""
+
+    __tablename__ = "backtest_presets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
+    strategy_id: Mapped[str] = mapped_column(String(50), ForeignKey("strategies.id"), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    symbols: Mapped[str] = mapped_column(Text, nullable=False)
+    initial_capital: Mapped[Decimal] = mapped_column(Numeric(16, 2), nullable=False)
+    parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
+    exit_policy_form: Mapped[dict] = mapped_column(JSONB, default=dict)
+
+    __table_args__ = (Index("idx_backtest_presets_created_at", "created_at"),)
+
+
 class SystemEvent(Base):
     __tablename__ = "system_events"
 

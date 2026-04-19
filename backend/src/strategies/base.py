@@ -1,8 +1,24 @@
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from typing import ClassVar, Literal
 import pandas as pd
+
+
+@dataclass
+class PortfolioSnapshot:
+    """Optional account state for backtest (live may pass None until broker integration).
+
+    When set, ``cash`` is free cash before any new order in the current recall round;
+    ``initial_capital`` is the run's starting equity.
+    ``equity`` is mark-to-market account value (cash + open positions) when the backtest
+    engine supplies it; use for volatility-based sizing. If None, strategies may fall back
+    to ``cash``.
+    """
+
+    cash: float | None = None
+    initial_capital: float | None = None
+    equity: float | None = None
 
 
 @dataclass
@@ -64,5 +80,13 @@ class BaseStrategy(ABC):
         symbols: list[str],
         parameters: dict,
         ctx: DataContext,
+        portfolio: PortfolioSnapshot | None = None,
     ) -> list[TradeSignal]:
-        """Core strategy logic. Must not access any data beyond what ctx provides."""
+        """Core strategy logic. Must not access any data beyond what ctx provides.
+
+        In backtests, ``portfolio`` carries current cash and initial capital; the engine may
+        call this multiple times per bar after each successful fill. When ``portfolio`` is
+        None (e.g. live scheduling), strategies should use ``parameters`` or defaults.
+        Within one call, multiple signals are tried in order; only the first executable
+        fill triggers a recall with updated cash.
+        """

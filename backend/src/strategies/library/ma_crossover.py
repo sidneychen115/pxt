@@ -1,5 +1,4 @@
-import pandas as pd
-from src.strategies.base import BaseStrategy, DataContext, TradeSignal
+from src.strategies.base import BaseStrategy, DataContext, PortfolioSnapshot, TradeSignal
 from src.strategies.indicators import Indicators
 
 
@@ -23,6 +22,7 @@ class MovingAverageCrossover(BaseStrategy):
         symbols: list[str],
         parameters: dict,
         ctx: DataContext,
+        portfolio: PortfolioSnapshot | None = None,
     ) -> list[TradeSignal]:
         fast = parameters.get("fast", self.default_parameters["fast"])
         slow = parameters.get("slow", self.default_parameters["slow"])

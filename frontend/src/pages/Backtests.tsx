@@ -1,15 +1,17 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, useEffect, useMemo } from 'react'
-import { useParams, useNavigate, useLocation } from 'react-router-dom'
+import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import {
   fetchBacktests, fetchBacktest, triggerBacktest,
   fetchBacktestTrades, fetchEquityCurve,
 } from '../api/backtests'
+import { createBacktestPreset, fetchBacktestPresets } from '../api/backtestPresetsApi'
 import { fetchStrategies } from '../api/strategies'
 import MetricCard from '../components/MetricCard'
 import EquityChart from '../components/EquityChart'
 import SignalBadge from '../components/SignalBadge'
-import type { Backtest, BacktestProgressPhase } from '../types'
+import BacktestConfigForm from '../components/BacktestConfigForm'
+import type { Backtest, BacktestProgressPhase, BacktestTrade } from '../types'
 import {
   EMPTY_EXIT_FORM,
   exitPolicyFromForm,
@@ -20,13 +22,11 @@ import {
   type ExitFormState,
 } from '../lib/backtestFormConfig'
 import {
-  listPresets,
-  saveNewPreset,
-  deletePreset,
-  getPreset,
   applyPreset,
+  dtoToPreset,
+  findMatchingPresetName,
+  presetBodyFromSnapshot,
   snapshotFromCurrentForm,
-  snapshotFromBacktest,
 } from '../lib/backtestPresets'
 
 function formatBacktestDateTime(iso: string | null | undefined): string {
@@ -43,11 +43,114 @@ function formatBacktestDateTime(iso: string | null | undefined): string {
   })
 }
 
+function formatIsoDateShort(iso: string | null | undefined): string {
+  if (iso == null || iso === '') return '—'
+  const s = iso.slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : iso
+}
+
+function fmtPct01(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return '—'
+  return `${(v * 100).toFixed(2)}%`
+}
+
+function fmtNum(v: number | null | undefined, digits = 2): string {
+  if (v == null || Number.isNaN(v)) return '—'
+  return v.toFixed(digits)
+}
+
+type BacktestSortKey =
+  | 'id'
+  | 'strategy'
+  | 'preset'
+  | 'total_return'
+  | 'annualized_return'
+  | 'sharpe_ratio'
+  | 'max_drawdown'
+  | 'win_rate'
+  | 'profit_factor'
+  | 'total_trades'
+  | 'avg_hold_days'
+  | 'created_at'
+  | 'start_date'
+  | 'end_date'
+  | 'status'
+
+type SortDirection = 'desc' | 'asc'
+
+type SortRule = { key: BacktestSortKey; direction: SortDirection }
+
+/** Normalize metrics for stable numeric sort (avoids string vs number mixed cmp). */
+function sortableNumber(v: number | null | undefined): number | null {
+  if (v == null) return null
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null
+  const n = Number(v)
+  return Number.isFinite(n) ? n : null
+}
+
+function compareSortValues(a: string | number | null, b: string | number | null): number {
+  if (a == null && b == null) return 0
+  if (a == null) return 1
+  if (b == null) return -1
+  if (typeof a === 'number' && typeof b === 'number') return a - b
+  return String(a).localeCompare(String(b), 'zh-CN', { sensitivity: 'base' })
+}
+
+type TradeSortKey =
+  | 'symbol'
+  | 'direction'
+  | 'quantity'
+  | 'entry_time'
+  | 'entry_price'
+  | 'exit_time'
+  | 'exit_price'
+  | 'pnl'
+  | 'pnl_pct'
+  | 'hold_days'
+  | 'exit_reason'
+
+type TradeSortRule = { key: TradeSortKey; direction: SortDirection }
+
+function isTradeNumericColumn(key: TradeSortKey): boolean {
+  return (
+    key === 'quantity' ||
+    key === 'entry_price' ||
+    key === 'exit_price' ||
+    key === 'pnl' ||
+    key === 'pnl_pct' ||
+    key === 'hold_days'
+  )
+}
+
 const PROGRESS_STEPS: { phase: BacktestProgressPhase; label: string }[] = [
   { phase: 'fetching_data', label: '数据拉取' },
   { phase: 'engine', label: '回测引擎' },
   { phase: 'llm_eval', label: 'LLM 评估' },
 ]
+
+const PHASE_ORDER: BacktestProgressPhase[] = ['fetching_data', 'engine', 'llm_eval']
+
+function phaseRank(p: BacktestProgressPhase | null | undefined): number {
+  if (p == null) return -1
+  const i = PHASE_ORDER.indexOf(p)
+  return i >= 0 ? i : -1
+}
+
+/** Stale HTTP poll must not overwrite newer WebSocket progress while status is running. */
+function mergeRunningBacktestProgress(prev: Backtest | undefined, next: Backtest): Backtest {
+  if (!prev || prev.id !== next.id) return next
+  if (prev.status !== 'running' || next.status !== 'running') return next
+  const pr = phaseRank(prev.progress_phase)
+  const nr = phaseRank(next.progress_phase)
+  if (pr > nr) {
+    return {
+      ...next,
+      progress_phase: prev.progress_phase,
+      progress_message: prev.progress_message ?? next.progress_message,
+    }
+  }
+  return next
+}
 
 function BacktestProgressPanel({ bt }: { bt: Backtest }) {
   const phaseIndex = useMemo(() => {
@@ -121,6 +224,8 @@ function BacktestList() {
     queryFn: () => fetchBacktests(),
   })
   const { data: strategies } = useQuery({ queryKey: ['strategies'], queryFn: fetchStrategies })
+  const { data: presetDtos } = useQuery({ queryKey: ['backtest-presets'], queryFn: fetchBacktestPresets })
+  const presets = useMemo(() => (presetDtos ?? []).map(dtoToPreset), [presetDtos])
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({
     strategy_id: '',
@@ -131,11 +236,89 @@ function BacktestList() {
   })
   const [exitPolicy, setExitPolicy] = useState<ExitFormState>(() => ({ ...EMPTY_EXIT_FORM }))
   const [parametersJson, setParametersJson] = useState('{}')
-  const [presetListTick, setPresetListTick] = useState(0)
-  const presets = useMemo(() => listPresets(), [presetListTick])
   const [loadPresetSelect, setLoadPresetSelect] = useState('')
   const [savePresetName, setSavePresetName] = useState('')
-  const [deletePresetId, setDeletePresetId] = useState('')
+  const [sortRules, setSortRules] = useState<SortRule[]>([])
+
+  const sortedRows = useMemo(() => {
+    const rows = (backtests ?? []).map((bt, idx) => ({
+      bt,
+      strategyName: strategies?.find(s => s.id === bt.strategy_id)?.name ?? bt.strategy_id,
+      presetLabel: findMatchingPresetName(bt, presets) ?? '—',
+      idx,
+    }))
+    if (sortRules.length === 0) return rows
+
+    const valueByKey = (row: (typeof rows)[number], key: BacktestSortKey): string | number | null => {
+      const { bt, strategyName, presetLabel } = row
+      switch (key) {
+        case 'id':
+          return bt.id
+        case 'strategy':
+          return strategyName
+        case 'preset':
+          return presetLabel
+        case 'total_return':
+          return sortableNumber(bt.total_return)
+        case 'annualized_return':
+          return sortableNumber(bt.annualized_return)
+        case 'sharpe_ratio':
+          return sortableNumber(bt.sharpe_ratio)
+        case 'max_drawdown':
+          return sortableNumber(bt.max_drawdown)
+        case 'win_rate':
+          return sortableNumber(bt.win_rate)
+        case 'profit_factor':
+          return sortableNumber(bt.profit_factor)
+        case 'total_trades':
+          return sortableNumber(bt.total_trades)
+        case 'avg_hold_days':
+          return sortableNumber(bt.avg_hold_days)
+        case 'created_at':
+          return new Date(bt.created_at).getTime()
+        case 'start_date':
+          return new Date(bt.start_date).getTime()
+        case 'end_date':
+          return new Date(bt.end_date).getTime()
+        case 'status':
+          return bt.status
+      }
+    }
+
+    return [...rows].sort((a, b) => {
+      for (const rule of sortRules) {
+        const base = compareSortValues(valueByKey(a, rule.key), valueByKey(b, rule.key))
+        if (base !== 0) return rule.direction === 'desc' ? -base : base
+      }
+      return a.idx - b.idx
+    })
+  }, [backtests, strategies, presets, sortRules])
+
+  const toggleSort = (key: BacktestSortKey, shiftKey: boolean) => {
+    setSortRules(prev => {
+      const existing = prev.find(r => r.key === key)
+      if (shiftKey) {
+        if (!existing) return [...prev, { key, direction: 'desc' }]
+        if (existing.direction === 'desc') {
+          return prev.map(r => (r.key === key ? { ...r, direction: 'asc' } : r))
+        }
+        return prev.filter(r => r.key !== key)
+      }
+      const onlyThis = prev.length === 1 && prev[0].key === key
+      if (onlyThis) {
+        if (prev[0].direction === 'desc') return [{ key, direction: 'asc' }]
+        return []
+      }
+      return [{ key, direction: 'desc' }]
+    })
+  }
+
+  const sortBadge = (key: BacktestSortKey): string => {
+    const idx = sortRules.findIndex(r => r.key === key)
+    if (idx < 0) return ''
+    const dir = sortRules[idx].direction === 'desc' ? '▼' : '▲'
+    return `${dir}${idx + 1}`
+  }
 
   useEffect(() => {
     const raw = (location.state as { prefillFromBacktest?: Backtest } | null)?.prefillFromBacktest
@@ -152,6 +335,19 @@ function BacktestList() {
     setShowForm(true)
     navigate('/backtests', { replace: true, state: {} })
   }, [location.state, navigate])
+
+  const savePresetMutation = useMutation({
+    mutationFn: async () => {
+      const name = savePresetName.trim()
+      if (!name) throw new Error('请填写预设名称')
+      const snap = snapshotFromCurrentForm(form, exitPolicy, parametersJson)
+      return createBacktestPreset(presetBodyFromSnapshot(snap, name))
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['backtest-presets'] })
+      setSavePresetName('')
+    },
+  })
 
   const triggerMutation = useMutation({
     mutationFn: () => {
@@ -185,7 +381,7 @@ function BacktestList() {
   })
 
   const applyLoadedPreset = (id: string) => {
-    const p = getPreset(id)
+    const p = presets.find(x => x.id === id)
     if (!p) return
     const snap = applyPreset(p)
     setForm({
@@ -205,23 +401,12 @@ function BacktestList() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold">Backtests</h1>
         <div className="flex flex-wrap items-center gap-2">
-          {presets.length > 0 && (
-            <select
-              value={loadPresetSelect}
-              onChange={(e) => {
-                const id = e.target.value
-                setLoadPresetSelect('')
-                if (!id) return
-                applyLoadedPreset(id)
-              }}
-              className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm min-w-[160px]"
-            >
-              <option value="">加载预设…</option>
-              {presets.map(p => (
-                <option key={p.id} value={p.id}>{p.name}</option>
-              ))}
-            </select>
-          )}
+          <Link
+            to="/backtests/presets"
+            className="px-3 py-2 text-sm rounded border border-gray-700 bg-gray-800/80 text-gray-200 hover:bg-gray-800"
+          >
+            预设管理
+          </Link>
           <button
             type="button"
             onClick={() => setShowForm(true)}
@@ -234,226 +419,70 @@ function BacktestList() {
       {showForm && (
         <div className="bg-gray-900 rounded-xl p-5 border border-gray-700 space-y-4">
           <h2 className="font-semibold">Configure Backtest</h2>
-          <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-3 space-y-3">
-            <div className="text-xs text-gray-500">预设保存在本机浏览器（换浏览器或清除数据会丢失）</div>
-            <div className="flex flex-wrap items-end gap-2">
-              <div className="flex-1 min-w-[140px]">
-                <label className="text-xs text-gray-400">保存当前表单为预设</label>
+          <div className="rounded-lg border border-gray-700 bg-gray-800/40 p-3">
+            <p className="text-xs text-gray-500 mb-2">
+              预设保存在服务器数据库。完整增删改请到
+              <Link to="/backtests/presets" className="text-blue-400 hover:underline mx-1">
+                预设管理
+              </Link>
+              。
+            </p>
+            <div className="flex flex-wrap items-end gap-3">
+              {presets.length > 0 && (
+                <div>
+                  <label className="text-xs text-gray-400 block">加载预设</label>
+                  <select
+                    value={loadPresetSelect}
+                    onChange={(e) => {
+                      const id = e.target.value
+                      setLoadPresetSelect('')
+                      if (!id) return
+                      applyLoadedPreset(id)
+                    }}
+                    className="bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1 min-w-[180px]"
+                  >
+                    <option value="">选择预设…</option>
+                    {presets.map(p => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className="flex-1 min-w-[140px] max-w-xs">
+                <label className="text-xs text-gray-400 block">保存为预设</label>
                 <input
                   type="text"
                   value={savePresetName}
                   onChange={e => setSavePresetName(e.target.value)}
-                  placeholder="预设名称"
+                  placeholder="新预设名称"
                   className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
                 />
               </div>
               <button
                 type="button"
                 onClick={() => {
-                  try {
-                    const snap = snapshotFromCurrentForm(form, exitPolicy, parametersJson)
-                    saveNewPreset(savePresetName, snap)
-                    setSavePresetName('')
-                    setPresetListTick(t => t + 1)
-                  } catch (err) {
-                    window.alert(err instanceof Error ? err.message : '保存失败')
-                  }
+                  savePresetMutation.mutate(undefined, {
+                    onError: err => {
+                      window.alert(err instanceof Error ? err.message : '保存失败')
+                    },
+                  })
                 }}
-                className="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm font-semibold"
+                disabled={savePresetMutation.isPending}
+                className="px-3 py-2 bg-emerald-700 hover:bg-emerald-600 rounded text-sm font-semibold disabled:opacity-50"
               >
-                保存预设
+                {savePresetMutation.isPending ? '保存中…' : '保存预设'}
               </button>
             </div>
-            {presets.length > 0 && (
-              <div className="flex flex-wrap items-end gap-2">
-                <div className="flex-1 min-w-[160px]">
-                  <label className="text-xs text-gray-400">删除预设</label>
-                  <select
-                    value={deletePresetId}
-                    onChange={e => setDeletePresetId(e.target.value)}
-                    className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-                  >
-                    <option value="">选择…</option>
-                    {presets.map(p => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <button
-                  type="button"
-                  disabled={!deletePresetId}
-                  onClick={() => {
-                    if (!deletePresetId) return
-                    deletePreset(deletePresetId)
-                    setDeletePresetId('')
-                    setPresetListTick(t => t + 1)
-                  }}
-                  className="px-3 py-2 bg-red-900/80 hover:bg-red-800 rounded text-sm font-semibold disabled:opacity-40"
-                >
-                  删除
-                </button>
-              </div>
-            )}
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-xs text-gray-400">Strategy</label>
-              <select
-                value={form.strategy_id}
-                onChange={e => setForm(f => ({ ...f, strategy_id: e.target.value }))}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-              >
-                <option value="">Select...</option>
-                {strategies?.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-gray-400">Symbols (comma separated)</label>
-              <input
-                value={form.symbols}
-                onChange={e => setForm(f => ({ ...f, symbols: e.target.value }))}
-                placeholder="AAPL, SPY, MSFT"
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400">Start Date</label>
-              <input
-                type="date"
-                value={form.start_date}
-                onChange={e => setForm(f => ({ ...f, start_date: e.target.value }))}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400">End Date</label>
-              <input
-                type="date"
-                value={form.end_date}
-                onChange={e => setForm(f => ({ ...f, end_date: e.target.value }))}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-gray-400">Initial Capital ($)</label>
-              <input
-                type="number"
-                value={form.initial_capital}
-                onChange={e => setForm(f => ({ ...f, initial_capital: +e.target.value }))}
-                className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-              />
-            </div>
-          </div>
-          <details className="border border-gray-700 rounded p-3">
-            <summary className="text-sm text-gray-400 cursor-pointer select-none">策略参数 (JSON，可选)</summary>
-            <textarea
-              value={parametersJson}
-              onChange={e => setParametersJson(e.target.value)}
-              spellCheck={false}
-              placeholder="{}"
-              className="w-full mt-2 min-h-[88px] font-mono text-xs bg-gray-800 border border-gray-700 rounded px-3 py-2"
-            />
-          </details>
-          <details className="border border-gray-700 rounded p-3">
-            <summary className="text-sm text-gray-400 cursor-pointer select-none">Exit Rules (optional)</summary>
-            <div className="grid grid-cols-2 gap-4 mt-3">
-              <div>
-                <label className="text-xs text-gray-400">Stop Loss %</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  placeholder="e.g. 5 for 5%"
-                  value={exitPolicy.stop_loss_pct}
-                  onChange={e => setExitPolicy(p => ({ ...p, stop_loss_pct: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400">Stop Loss $ (absolute)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  placeholder="e.g. 500 for $500 loss"
-                  value={exitPolicy.stop_loss_abs}
-                  onChange={e => setExitPolicy(p => ({ ...p, stop_loss_abs: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400">Take Profit %</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  placeholder="e.g. 15 for 15%"
-                  value={exitPolicy.take_profit_pct}
-                  onChange={e => setExitPolicy(p => ({ ...p, take_profit_pct: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400">Take Profit $ (absolute)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="1"
-                  placeholder="e.g. 2000 for $2000 gain"
-                  value={exitPolicy.take_profit_abs}
-                  onChange={e => setExitPolicy(p => ({ ...p, take_profit_abs: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400">Trailing Stop %</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  placeholder="e.g. 5 for 5%"
-                  value={exitPolicy.trailing_stop_pct}
-                  onChange={e => setExitPolicy(p => ({ ...p, trailing_stop_pct: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400">Trailing Activate % (optional)</label>
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  placeholder="e.g. 10 to activate after 10% gain"
-                  value={exitPolicy.trailing_activate_pct}
-                  onChange={e => setExitPolicy(p => ({ ...p, trailing_activate_pct: e.target.value }))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-                />
-              </div>
-              <div>
-                <label className="text-xs text-gray-400">Price Check Mode</label>
-                <select
-                  value={exitPolicy.price_check_mode}
-                  onChange={e => setExitPolicy(p => ({ ...p, price_check_mode: e.target.value as 'close' | 'ohlc' }))}
-                  className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1"
-                >
-                  <option value="close">Close (fill at next open)</option>
-                  <option value="ohlc">OHLC (intrabar fill at trigger price)</option>
-                </select>
-              </div>
-              <div className="col-span-2 flex items-start gap-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="disable_sell_signal"
-                  checked={exitPolicy.disable_sell_signal}
-                  onChange={e => setExitPolicy(p => ({ ...p, disable_sell_signal: e.target.checked }))}
-                  className="mt-1 rounded border-gray-600"
-                />
-                <label htmlFor="disable_sell_signal" className="text-sm text-gray-300 cursor-pointer select-none leading-snug">
-                  禁用卖出信号（忽略策略 SELL，仅通过止损/止盈/移动止损或回测结束平仓）
-                </label>
-              </div>
-            </div>
-          </details>
+          <BacktestConfigForm
+            form={form}
+            setForm={setForm}
+            exitPolicy={exitPolicy}
+            setExitPolicy={setExitPolicy}
+            parametersJson={parametersJson}
+            setParametersJson={setParametersJson}
+            strategies={strategies}
+          />
           <div className="flex gap-2">
             <button onClick={() => setShowForm(false)} className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200">
               Cancel
@@ -474,41 +503,121 @@ function BacktestList() {
         </div>
       )}
       {isLoading && <div className="text-gray-400">Loading...</div>}
-      <div className="space-y-3">
-        {backtests?.map(bt => (
-          <div
-            key={bt.id}
-            role="button"
-            tabIndex={0}
-            onClick={() => navigate(`/backtests/${bt.id}`)}
-            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') navigate(`/backtests/${bt.id}`) }}
-            className="bg-gray-900 rounded-xl p-4 border border-gray-800 hover:border-gray-600 cursor-pointer"
-          >
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="font-semibold text-gray-100">{bt.strategy_id}</div>
-                <div className="text-xs text-gray-400 mt-0.5">
-                  {bt.start_date} → {bt.end_date} | {bt.symbols.join(', ')}
-                </div>
-              </div>
-              <div className="flex items-center gap-4 text-sm">
-                {bt.status === 'completed' && (
-                  <>
-                    <span className={bt.total_return != null && bt.total_return >= 0 ? 'text-green-400' : 'text-red-400'}>
-                      {bt.total_return != null ? `${(bt.total_return * 100).toFixed(2)}%` : '—'}
+      {sortRules.length > 1 && (
+        <p className="text-xs text-gray-500 mb-2 px-1">
+          多列排序按优先级：仅当左侧列的值并列时，才按下一列排序；两列数值都不同则顺序只由左侧列决定。
+        </p>
+      )}
+      <div className="overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/80">
+        <table className="min-w-[1200px] w-full text-sm text-left">
+          <thead>
+            <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wide">
+              {([
+                ['id', 'ID'],
+                ['strategy', '策略'],
+                ['preset', '预设'],
+                ['total_return', '总收益'],
+                ['annualized_return', '年化'],
+                ['sharpe_ratio', '夏普'],
+                ['max_drawdown', '最大回撤'],
+                ['win_rate', '胜率'],
+                ['profit_factor', '盈利因子'],
+                ['total_trades', '交易数'],
+                ['avg_hold_days', '均持仓'],
+                ['created_at', '创建时间'],
+                ['start_date', '区间起'],
+                ['end_date', '区间止'],
+                ['status', '状态'],
+              ] as [BacktestSortKey, string][]).map(([key, label]) => (
+                <th
+                  key={key}
+                  className={`px-3 py-2.5 font-medium whitespace-nowrap ${key === 'preset' ? 'min-w-[100px]' : ''} ${
+                    key === 'created_at' ? 'min-w-[130px]' : ''
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={e => toggleSort(key, e.shiftKey)}
+                    className="inline-flex items-center gap-1 hover:text-gray-300"
+                    title="单击：单列排序（降序→升序→取消）；Shift+单击：追加为多列排序（下一列仅在上一列并列时生效）"
+                  >
+                    <span>{label}</span>
+                    <span className="text-[10px] text-gray-400 min-w-[20px] text-left">{sortBadge(key)}</span>
+                  </button>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {backtests?.length === 0 && (
+              <tr>
+                <td colSpan={15} className="px-3 py-8 text-center text-gray-500">
+                  暂无回测记录。点击「New Backtest」开始。
+                </td>
+              </tr>
+            )}
+            {sortedRows.map(({ bt, strategyName, presetLabel }, idx) => {
+              return (
+                <tr
+                  key={bt.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => navigate(`/backtests/${bt.id}`)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' || e.key === ' ') navigate(`/backtests/${bt.id}`)
+                  }}
+                  className={`border-b border-gray-800/80 hover:bg-gray-800/60 cursor-pointer ${
+                    idx % 2 === 0 ? 'bg-gray-900/40' : 'bg-gray-900/20'
+                  }`}
+                >
+                  <td className="px-3 py-2 font-mono text-gray-400 whitespace-nowrap">{bt.id}</td>
+                  <td className="px-3 py-2 text-gray-100 font-medium whitespace-nowrap max-w-[160px] truncate" title={strategyName}>
+                    {strategyName}
+                  </td>
+                  <td className="px-3 py-2 text-gray-300 max-w-[140px] truncate" title={presetLabel === '—' ? undefined : presetLabel}>
+                    {presetLabel}
+                  </td>
+                  <td
+                    className={`px-3 py-2 whitespace-nowrap ${
+                      bt.total_return != null
+                        ? bt.total_return >= 0
+                          ? 'text-green-400'
+                          : 'text-red-400'
+                        : 'text-gray-500'
+                    }`}
+                  >
+                    {fmtPct01(bt.total_return)}
+                  </td>
+                  <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtPct01(bt.annualized_return)}</td>
+                  <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtNum(bt.sharpe_ratio)}</td>
+                  <td className="px-3 py-2 text-red-300/90 whitespace-nowrap">{fmtPct01(bt.max_drawdown)}</td>
+                  <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtPct01(bt.win_rate)}</td>
+                  <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtNum(bt.profit_factor)}</td>
+                  <td className="px-3 py-2 text-gray-300 whitespace-nowrap tabular-nums">
+                    {bt.total_trades != null ? String(bt.total_trades) : '—'}
+                  </td>
+                  <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtNum(bt.avg_hold_days, 1)}</td>
+                  <td className="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">{formatBacktestDateTime(bt.created_at)}</td>
+                  <td className="px-3 py-2 text-gray-400 whitespace-nowrap">{formatIsoDateShort(bt.start_date)}</td>
+                  <td className="px-3 py-2 text-gray-400 whitespace-nowrap">{formatIsoDateShort(bt.end_date)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    <span
+                      className={`text-xs px-2 py-0.5 rounded ${
+                        bt.status === 'completed'
+                          ? 'bg-green-900/80 text-green-300'
+                          : bt.status === 'failed'
+                            ? 'bg-red-900/80 text-red-300'
+                            : 'bg-yellow-900/80 text-yellow-300'
+                      }`}
+                    >
+                      {bt.status}
                     </span>
-                    <span className="text-gray-400">Sharpe: {bt.sharpe_ratio?.toFixed(2) ?? '—'}</span>
-                  </>
-                )}
-                <span className={`text-xs px-2 py-0.5 rounded ${
-                  bt.status === 'completed' ? 'bg-green-900 text-green-300' :
-                  bt.status === 'failed' ? 'bg-red-900 text-red-300' :
-                  'bg-yellow-900 text-yellow-300'
-                }`}>{bt.status}</span>
-              </div>
-            </div>
-          </div>
-        ))}
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
       </div>
     </div>
   )
@@ -517,13 +626,13 @@ function BacktestList() {
 function BacktestDetail({ id }: { id: number }) {
   const navigate = useNavigate()
   const qc = useQueryClient()
-  const [sortBy, setSortBy] = useState('entry_time')
-  const [sortOrder, setSortOrder] = useState('asc')
-  const [detailPresetName, setDetailPresetName] = useState('')
-  const [detailPresetHint, setDetailPresetHint] = useState<string | null>(null)
+  const [tradeSortRules, setTradeSortRules] = useState<TradeSortRule[]>([])
   const { data: bt, isLoading } = useQuery({
     queryKey: ['backtest', id],
-    queryFn: () => fetchBacktest(id),
+    queryFn: async () => {
+      const next = await fetchBacktest(id)
+      return mergeRunningBacktestProgress(qc.getQueryData<Backtest>(['backtest', id]), next)
+    },
     refetchInterval: (q) => (q.state.data?.status === 'running' ? 1500 : false),
   })
 
@@ -569,16 +678,80 @@ function BacktestDetail({ id }: { id: number }) {
     }
   }, [id, bt?.status, qc])
 
-  useEffect(() => {
-    setDetailPresetHint(null)
-    setDetailPresetName('')
-  }, [id])
 
   const { data: trades } = useQuery({
-    queryKey: ['bt-trades', id, sortBy, sortOrder],
-    queryFn: () => fetchBacktestTrades(id, sortBy, sortOrder),
+    queryKey: ['bt-trades', id],
+    queryFn: () => fetchBacktestTrades(id),
     enabled: bt?.status === 'completed',
   })
+
+  const sortedTradeRows = useMemo(() => {
+    const raw = trades ?? []
+    const rows = raw.map((t, idx) => ({ t, idx }))
+    if (tradeSortRules.length === 0) return rows
+
+    const valueByKey = (row: { t: BacktestTrade; idx: number }, key: TradeSortKey): string | number | null => {
+      const { t } = row
+      switch (key) {
+        case 'symbol':
+          return t.symbol
+        case 'direction':
+          return t.direction
+        case 'quantity':
+          return sortableNumber(t.quantity)
+        case 'entry_time':
+          return new Date(t.entry_time).getTime()
+        case 'entry_price':
+          return sortableNumber(t.entry_price)
+        case 'exit_time':
+          return t.exit_time ? new Date(t.exit_time).getTime() : null
+        case 'exit_price':
+          return sortableNumber(t.exit_price)
+        case 'pnl':
+          return sortableNumber(t.pnl)
+        case 'pnl_pct':
+          return sortableNumber(t.pnl_pct)
+        case 'hold_days':
+          return sortableNumber(t.hold_days)
+        case 'exit_reason':
+          return t.exit_reason ?? null
+      }
+    }
+
+    return [...rows].sort((a, b) => {
+      for (const rule of tradeSortRules) {
+        const base = compareSortValues(valueByKey(a, rule.key), valueByKey(b, rule.key))
+        if (base !== 0) return rule.direction === 'desc' ? -base : base
+      }
+      return a.idx - b.idx
+    })
+  }, [trades, tradeSortRules])
+
+  const toggleTradeSort = (key: TradeSortKey, shiftKey: boolean) => {
+    setTradeSortRules(prev => {
+      const existing = prev.find(r => r.key === key)
+      if (shiftKey) {
+        if (!existing) return [...prev, { key, direction: 'desc' }]
+        if (existing.direction === 'desc') {
+          return prev.map(r => (r.key === key ? { ...r, direction: 'asc' } : r))
+        }
+        return prev.filter(r => r.key !== key)
+      }
+      const onlyThis = prev.length === 1 && prev[0].key === key
+      if (onlyThis) {
+        if (prev[0].direction === 'desc') return [{ key, direction: 'asc' }]
+        return []
+      }
+      return [{ key, direction: 'desc' }]
+    })
+  }
+
+  const tradeSortBadge = (key: TradeSortKey): string => {
+    const idx = tradeSortRules.findIndex(r => r.key === key)
+    if (idx < 0) return ''
+    const dir = tradeSortRules[idx].direction === 'desc' ? '▼' : '▲'
+    return `${dir}${idx + 1}`
+  }
   const { data: equity } = useQuery({
     queryKey: ['bt-equity', id],
     queryFn: () => fetchEquityCurve(id),
@@ -637,34 +810,6 @@ function BacktestDetail({ id }: { id: number }) {
           {rerunMutation.error instanceof Error ? rerunMutation.error.message : '重新测试失败'}
         </p>
       )}
-      <div className="flex flex-wrap items-center gap-2 bg-gray-900/60 border border-gray-800 rounded-lg px-3 py-2.5">
-        <span className="text-sm text-gray-400 shrink-0">保存为配置预设</span>
-        <input
-          type="text"
-          value={detailPresetName}
-          onChange={e => setDetailPresetName(e.target.value)}
-          placeholder="预设名称"
-          className="flex-1 min-w-[120px] max-w-xs bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm"
-        />
-        <button
-          type="button"
-          onClick={() => {
-            try {
-              saveNewPreset(detailPresetName, snapshotFromBacktest(bt))
-              setDetailPresetHint('已保存到本机浏览器，可在列表页「加载预设」使用')
-              setDetailPresetName('')
-            } catch (err) {
-              window.alert(err instanceof Error ? err.message : '保存失败')
-            }
-          }}
-          className="px-3 py-1.5 text-sm rounded font-semibold bg-emerald-800 hover:bg-emerald-700 text-white shrink-0"
-        >
-          保存预设
-        </button>
-        {detailPresetHint && (
-          <span className="text-xs text-green-400 w-full sm:w-auto">{detailPresetHint}</span>
-        )}
-      </div>
       {bt.status === 'running' && <BacktestProgressPanel bt={bt} />}
       {bt.status === 'completed' && (
         <>
@@ -706,46 +851,51 @@ function BacktestDetail({ id }: { id: number }) {
             </div>
           )}
           <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
-            <div className="px-4 py-3 border-b border-gray-800 flex flex-wrap items-center gap-4">
+            <div className="px-4 py-3 border-b border-gray-800">
               <h2 className="text-sm font-semibold text-gray-300">成交明细</h2>
-              <select
-                value={sortBy}
-                onChange={e => setSortBy(e.target.value)}
-                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs ml-auto"
-              >
-                <option value="entry_time">买入时间</option>
-                <option value="pnl">盈亏</option>
-                <option value="hold_days">持有天数</option>
-                <option value="pnl_pct">收益率</option>
-              </select>
-              <select
-                value={sortOrder}
-                onChange={e => setSortOrder(e.target.value)}
-                className="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs"
-              >
-                <option value="asc">升序</option>
-                <option value="desc">降序</option>
-              </select>
+              <p className="text-xs text-gray-500 mt-1">
+                表头可排序：单击单列（降序→升序→取消）；Shift+单击追加多列排序。
+                {tradeSortRules.length > 1 && ' 多列时仅当左侧列并列时才用下一列。'}
+              </p>
             </div>
             <div className="overflow-x-auto">
             <table className="w-full text-sm min-w-[960px]">
               <thead>
                 <tr className="border-b border-gray-800 text-gray-400 text-xs">
-                  <th className="px-4 py-2 text-left whitespace-nowrap">标的</th>
-                  <th className="px-4 py-2 text-left whitespace-nowrap">方向</th>
-                  <th className="px-4 py-2 text-right whitespace-nowrap">数量</th>
-                  <th className="px-4 py-2 text-left whitespace-nowrap">买入时间</th>
-                  <th className="px-4 py-2 text-right whitespace-nowrap">买入价</th>
-                  <th className="px-4 py-2 text-left whitespace-nowrap">卖出时间</th>
-                  <th className="px-4 py-2 text-right whitespace-nowrap">卖出价</th>
-                  <th className="px-4 py-2 text-right whitespace-nowrap">P&amp;L</th>
-                  <th className="px-4 py-2 text-right whitespace-nowrap">收益率</th>
-                  <th className="px-4 py-2 text-right whitespace-nowrap">天数</th>
-                  <th className="px-4 py-2 text-left whitespace-nowrap">原因</th>
+                  {([
+                    ['symbol', '标的'],
+                    ['direction', '方向'],
+                    ['quantity', '数量'],
+                    ['entry_time', '买入时间'],
+                    ['entry_price', '买入价'],
+                    ['exit_time', '卖出时间'],
+                    ['exit_price', '卖出价'],
+                    ['pnl', 'P&L'],
+                    ['pnl_pct', '收益率'],
+                    ['hold_days', '天数'],
+                    ['exit_reason', '原因'],
+                  ] as [TradeSortKey, string][]).map(([key, label]) => (
+                    <th
+                      key={key}
+                      className={`px-4 py-2 whitespace-nowrap font-medium ${isTradeNumericColumn(key) ? 'text-right' : 'text-left'}`}
+                    >
+                      <button
+                        type="button"
+                        onClick={e => toggleTradeSort(key, e.shiftKey)}
+                        className={`inline-flex items-center gap-1 hover:text-gray-300 ${
+                          isTradeNumericColumn(key) ? 'justify-end w-full' : ''
+                        }`}
+                        title="单击：单列排序（降序→升序→取消）；Shift+单击：追加为多列排序"
+                      >
+                        <span>{label}</span>
+                        <span className="text-[10px] text-gray-400 min-w-[20px] text-left">{tradeSortBadge(key)}</span>
+                      </button>
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
-                {trades?.map(t => (
+                {sortedTradeRows.map(({ t }) => (
                   <tr key={t.id} className="border-b border-gray-800/40 hover:bg-gray-800/30">
                     <td className="px-4 py-2 font-mono font-semibold text-gray-200">{t.symbol}</td>
                     <td className="px-4 py-2"><SignalBadge direction={t.direction} /></td>
@@ -777,7 +927,7 @@ function BacktestDetail({ id }: { id: number }) {
               </tbody>
             </table>
             </div>
-            {trades?.length === 0 && (
+            {(trades?.length ?? 0) === 0 && (
               <div className="text-gray-500 text-center py-6 text-sm">暂无成交</div>
             )}
           </div>

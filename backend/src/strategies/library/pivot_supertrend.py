@@ -1,7 +1,7 @@
 # backend/src/strategies/library/pivot_supertrend.py
 import numpy as np
 import pandas as pd
-from src.strategies.base import BaseStrategy, DataContext, TradeSignal
+from src.strategies.base import BaseStrategy, DataContext, PortfolioSnapshot, TradeSignal
 from src.strategies.indicators import Indicators
 
 
@@ -47,6 +47,7 @@ class PivotSupertrendStrategy(BaseStrategy):
         symbols: list[str],
         parameters: dict,
         ctx: DataContext,
+        portfolio: PortfolioSnapshot | None = None,
     ) -> list[TradeSignal]:
         prd    = int(parameters.get("pivot_period", self.default_parameters["pivot_period"]))
         factor = float(parameters.get("atr_factor",   self.default_parameters["atr_factor"]))

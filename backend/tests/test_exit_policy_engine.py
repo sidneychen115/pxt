@@ -20,7 +20,7 @@ class _BuyOnceStrategy(BaseStrategy):
     def __init__(self):
         self._bought = False
 
-    async def generate_signals(self, symbols, parameters, ctx):
+    async def generate_signals(self, symbols, parameters, ctx, portfolio=None):
         sym = symbols[0]
         bars = await ctx.get_bars(sym, "1d")
         if len(bars) == 0 and not self._bought:
@@ -64,7 +64,7 @@ async def test_stop_loss_abs_close():
         name = "_test_fixed_qty"
         def __init__(self):
             self._bought = False
-        async def generate_signals(self, symbols, parameters, ctx):
+        async def generate_signals(self, symbols, parameters, ctx, portfolio=None):
             sym = symbols[0]
             bars = await ctx.get_bars(sym, "1d")
             if len(bars) == 0 and not self._bought:
@@ -146,7 +146,7 @@ async def test_take_profit_abs_close():
         name = "_test_fixed_qty2"
         def __init__(self):
             self._bought = False
-        async def generate_signals(self, symbols, parameters, ctx):
+        async def generate_signals(self, symbols, parameters, ctx, portfolio=None):
             sym = symbols[0]
             bars = await ctx.get_bars(sym, "1d")
             if len(bars) == 0 and not self._bought:
@@ -288,7 +288,7 @@ async def test_policy_beats_signal_same_bar():
         name = "_test_buy_sell_at2"
         def __init__(self):
             self._bought = False
-        async def generate_signals(self, symbols, parameters, ctx):
+        async def generate_signals(self, symbols, parameters, ctx, portfolio=None):
             sym = symbols[0]
             bars_data = await ctx.get_bars(sym, "1d")
             n = len(bars_data)

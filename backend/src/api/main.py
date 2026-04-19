@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from src.api.websocket import ws_manager
-from src.api.routers import strategies, signals, backtests, system
+from src.api.routers import strategies, signals, backtests, backtest_presets, system
 from src.scheduler.runner import StrategyScheduler
 
 _scheduler: StrategyScheduler | None = None
@@ -30,6 +30,7 @@ app.add_middleware(
 app.include_router(strategies.router, prefix="/api/strategies", tags=["strategies"])
 app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
 app.include_router(backtests.router, prefix="/api/backtests", tags=["backtests"])
+app.include_router(backtest_presets.router, prefix="/api/backtest-presets", tags=["backtest-presets"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 
 

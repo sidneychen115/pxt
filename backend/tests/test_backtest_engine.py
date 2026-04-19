@@ -1,7 +1,6 @@
 import pytest
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone
 from src.backtesting.engine import BacktestEngine
 from src.backtesting.exit_policy import ExitPolicy
 from src.strategies.base import BaseStrategy, TradeSignal
@@ -15,7 +14,7 @@ class _BuyThenSellStrategy(BaseStrategy):
     name = "Test Buy Then Sell"
     _bought: bool = False
 
-    async def generate_signals(self, symbols, parameters, ctx):
+    async def generate_signals(self, symbols, parameters, ctx, portfolio=None):
         sym = symbols[0]
         bars = await ctx.get_bars(sym, "1d", limit=500)
         if len(bars) < 2:
@@ -94,6 +93,40 @@ async def test_sell_signal_closes_without_disable():
     data = make_trending_data("SPY", 30, "up")
     metrics = await engine.run(strategy, ["SPY"], {}, data, "1d")
     assert any(t.exit_reason == "signal" for t in metrics.trades)
+
+
+class _DualSymbolBuyStrategy(BaseStrategy):
+    """First recall round: buy SPY; second: buy QQQ. Records portfolio.cash each call."""
+
+    id = "test_dual_buy"
+    name = "Dual Buy"
+    step = 0
+
+    def __init__(self):
+        self.cash_seen: list[float] = []
+
+    async def generate_signals(self, symbols, parameters, ctx, portfolio=None):
+        if portfolio is not None and portfolio.cash is not None:
+            self.cash_seen.append(float(portfolio.cash))
+        if self.step == 0:
+            self.step = 1
+            return [TradeSignal("SPY", "buy", "market", quantity=10)]
+        if self.step == 1:
+            self.step = 2
+            return [TradeSignal("QQQ", "buy", "market", quantity=5)]
+        return []
+
+
+async def test_portfolio_recall_decreases_cash():
+    """Second generate_signals call in same bar sees reduced cash after first fill."""
+    data = make_trending_data("SPY", 40, "up")
+    data["QQQ"] = make_trending_data("QQQ", 40, "up")["QQQ"]
+    strat = _DualSymbolBuyStrategy()
+    engine = BacktestEngine(initial_capital=100_000.0)
+    await engine.run(strat, ["SPY", "QQQ"], {}, data, "1d")
+    assert len(strat.cash_seen) >= 2
+    assert strat.cash_seen[0] == pytest.approx(100_000.0)
+    assert strat.cash_seen[1] < strat.cash_seen[0]
 
 
 async def test_profit_factor_no_losers():

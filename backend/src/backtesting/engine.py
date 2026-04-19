@@ -1,7 +1,8 @@
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import pandas as pd
-from src.strategies.base import BaseStrategy
+from src.strategies.base import BaseStrategy, PortfolioSnapshot, TradeSignal
 from src.backtesting.data_context import BacktestDataContext
 from src.backtesting.exit_policy import ExitPolicy
 from src.backtesting.metrics import BacktestMetrics, TradeRecord
@@ -16,10 +17,67 @@ class _PositionState:
     take_profit_price: float | None = None
 
 
+MAX_SIGNAL_ROUNDS_PER_BAR = 64
+
+
 class BacktestEngine:
     def __init__(self, initial_capital: float = 100_000.0, exit_policy: ExitPolicy | None = None):
         self._capital = initial_capital
         self._exit_policy = exit_policy
+
+    def _try_execute_signal(
+        self,
+        sig: TradeSignal,
+        *,
+        cash: float,
+        positions: dict[str, _PositionState],
+        closed_trades: list[TradeRecord],
+        data: dict[str, dict[str, pd.DataFrame]],
+        timeframe: str,
+        next_time: datetime,
+    ) -> tuple[bool, float]:
+        """Execute one signal at next bar's open. Returns (filled, new_cash). Mutates positions/closed_trades."""
+        sym = sig.symbol
+        next_df = data.get(sym, {}).get(timeframe)
+        if next_df is None:
+            return False, cash
+        future = next_df[next_df.index >= next_time]
+        if future.empty:
+            return False, cash
+        fill_price = float(future["open"].iloc[0])
+        fill_time = future.index[0]
+
+        if sig.direction == "buy" and sym not in positions:
+            qty = sig.quantity or max(1, int(cash * 0.1 / fill_price))
+            cost = qty * fill_price
+            if cost <= cash:
+                new_cash = cash - cost
+                trade = TradeRecord(
+                    symbol=sym, direction="buy", quantity=qty,
+                    entry_time=fill_time, entry_price=fill_price,
+                    entry_signal={"reasoning": sig.reasoning},
+                )
+                positions[sym] = _PositionState(
+                    trade=trade,
+                    peak_price=fill_price,
+                    stop_price=self._compute_stop_price(fill_price, qty),
+                    take_profit_price=self._compute_tp_price(fill_price, qty),
+                )
+                return True, new_cash
+            return False, cash
+
+        if sig.direction == "sell" and sym in positions:
+            if self._exit_policy and self._exit_policy.disable_sell_signal:
+                return False, cash
+            state = positions.pop(sym)
+            state.trade.exit_time = fill_time
+            state.trade.exit_price = fill_price
+            state.trade.exit_reason = "signal"
+            new_cash = cash + state.trade.quantity * fill_price
+            closed_trades.append(state.trade)
+            return True, new_cash
+
+        return False, cash
 
     def _compute_stop_price(self, entry: float, qty: float) -> float | None:
         ep = self._exit_policy
@@ -108,6 +166,27 @@ class BacktestEngine:
             return state.peak_price * (1 - ep.trailing_stop_pct)
         raise ValueError(f"Unknown exit reason for ohlc fill: {reason}")
 
+    def _account_equity(
+        self,
+        cash: float,
+        positions: dict[str, _PositionState],
+        data: dict[str, dict[str, pd.DataFrame]],
+        timeframe: str,
+        as_of: datetime,
+    ) -> float:
+        """Cash plus open positions marked at ``as_of`` bar's close (per symbol)."""
+        total = cash
+        for sym, state in positions.items():
+            tf_df = data.get(sym, {}).get(timeframe)
+            if tf_df is None or tf_df.empty:
+                continue
+            eligible = tf_df[tf_df.index <= as_of]
+            if eligible.empty:
+                continue
+            px = float(eligible["close"].iloc[-1])
+            total += state.trade.quantity * px
+        return total
+
     async def run(
         self,
         strategy: BaseStrategy,
@@ -129,6 +208,9 @@ class BacktestEngine:
         if len(all_times) < 2:
             raise ValueError("Insufficient data for backtesting.")
 
+        # Yield so the event loop can serve HTTP polls / WS right after entering engine phase.
+        await asyncio.sleep(0)
+
         cash = self._capital
         positions: dict[str, _PositionState] = {}
         # Invariant: a sym in pending_close_exits must NOT also be in positions.
@@ -139,6 +221,8 @@ class BacktestEngine:
 
         for i, current_time in enumerate(all_times[:-1]):
             next_time = all_times[i + 1]
+            # Cooperate with asyncio so polling can observe progress_phase while the engine runs.
+            await asyncio.sleep(0)
 
             # Settle pending close-mode exits at this bar's open
             for sym, (reason, state) in list(pending_close_exits.items()):
@@ -180,47 +264,35 @@ class BacktestEngine:
                             # Invariant: positions.pop(sym) is paired with adding to pending_close_exits
                             pending_close_exits[sym] = (reason, positions.pop(sym))
 
-            # Fill orders at next bar's open price
-            ctx = BacktestDataContext(data, current_time)
-            signals = await strategy.generate_signals(symbols, parameters, ctx)
-
-            for sig in signals:
-                sym = sig.symbol
-                next_df = data.get(sym, {}).get(timeframe)
-                if next_df is None:
-                    continue
-                future = next_df[next_df.index >= next_time]
-                if future.empty:
-                    continue
-                fill_price = float(future["open"].iloc[0])
-                fill_time = future.index[0]
-
-                # Note: "sell" signals only close existing long positions; short selling not supported.
-                if sig.direction == "buy" and sym not in positions:
-                    qty = sig.quantity or max(1, int(cash * 0.1 / fill_price))
-                    cost = qty * fill_price
-                    if cost <= cash:
-                        cash -= cost
-                        trade = TradeRecord(
-                            symbol=sym, direction="buy", quantity=qty,
-                            entry_time=fill_time, entry_price=fill_price,
-                            entry_signal={"reasoning": sig.reasoning},
-                        )
-                        positions[sym] = _PositionState(
-                            trade=trade,
-                            peak_price=fill_price,
-                            stop_price=self._compute_stop_price(fill_price, qty),
-                            take_profit_price=self._compute_tp_price(fill_price, qty),
-                        )
-                elif sig.direction == "sell" and sym in positions:
-                    if self._exit_policy and self._exit_policy.disable_sell_signal:
-                        continue
-                    state = positions.pop(sym)
-                    state.trade.exit_time = fill_time
-                    state.trade.exit_price = fill_price
-                    state.trade.exit_reason = "signal"
-                    cash += state.trade.quantity * fill_price
-                    closed_trades.append(state.trade)
+            # Fill orders at next bar's open; recall strategy after each successful fill with updated cash.
+            round_i = 0
+            while round_i < MAX_SIGNAL_ROUNDS_PER_BAR:
+                ctx = BacktestDataContext(data, current_time)
+                equity = self._account_equity(cash, positions, data, timeframe, current_time)
+                snapshot = PortfolioSnapshot(
+                    cash=cash, initial_capital=self._capital, equity=equity
+                )
+                signals = await strategy.generate_signals(symbols, parameters, ctx, portfolio=snapshot)
+                if not signals:
+                    break
+                progressed = False
+                for sig in signals:
+                    filled, new_cash = self._try_execute_signal(
+                        sig,
+                        cash=cash,
+                        positions=positions,
+                        closed_trades=closed_trades,
+                        data=data,
+                        timeframe=timeframe,
+                        next_time=next_time,
+                    )
+                    if filled:
+                        cash = new_cash
+                        progressed = True
+                        round_i += 1
+                        break
+                if not progressed:
+                    break
 
             # Mark-to-market equity
             portfolio_value = cash

@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import select
+from sqlalchemy.engine.url import make_url
 from src.core.config import settings
 from src.core.database import async_session_factory
 from src.core.models import Strategy, SystemEvent
@@ -33,11 +34,33 @@ class StrategyScheduler:
         self._scheduler.shutdown(wait=False)
 
     async def _register_all_jobs(self) -> None:
-        async with async_session_factory() as session:
-            result = await session.execute(
-                select(Strategy).where(Strategy.is_active.is_(True))
-            )
-            strategies = result.scalars().all()
+        parsed_url = None
+        try:
+            parsed_url = make_url(settings.database_url)
+        except Exception:
+            pass
+
+        try:
+            async with async_session_factory() as session:
+                result = await session.execute(
+                    select(Strategy).where(Strategy.is_active.is_(True))
+                )
+                strategies = result.scalars().all()
+        except OSError as e:
+            if getattr(e, "errno", None) == 111 or isinstance(e, ConnectionRefusedError):
+                target = (
+                    f"{parsed_url.host}:{parsed_url.port}"
+                    if parsed_url is not None and parsed_url.host
+                    else "database"
+                )
+                raise RuntimeError(
+                    f"Cannot connect to PostgreSQL at {target} (connection refused). "
+                    "If the database runs only inside Docker, publish port 5432 to the host "
+                    "(e.g. `ports: [\"127.0.0.1:5432:5432\"]` on the postgres service) and keep "
+                    "DATABASE_URL pointing at localhost:5432. "
+                    "Then recreate the container: `cd docker && docker compose up -d postgres`."
+                ) from e
+            raise
 
         # Data sync job: runs every 5 minutes during market hours (CT)
         self._scheduler.add_job(
@@ -112,7 +135,7 @@ class StrategyScheduler:
             try:
                 async with asyncio.timeout(settings.strategy_run_timeout):
                     signals = await strategy.generate_signals(
-                        config.symbols, config.parameters, ctx
+                        config.symbols, config.parameters, ctx, portfolio=None
                     )
                 await self._save_signals(session, config, signals)
                 await self._log_event(

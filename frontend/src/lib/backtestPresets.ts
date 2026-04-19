@@ -1,17 +1,17 @@
 /**
- * Saved backtest configuration presets (browser localStorage).
- * No server DB — remind users configs are per-browser.
+ * Backtest configuration presets — stored in PostgreSQL via /api/backtest-presets.
+ * Helpers for matching, snapshots, and DTO mapping.
  */
 import type { Backtest } from '../types'
+import type { BacktestPresetDto } from '../api/backtestPresetsApi'
+import type { BacktestPresetCreateBody } from '../api/backtestPresetsApi'
 import {
   EMPTY_EXIT_FORM,
   exitPolicyToForm,
+  parseParametersJson,
   type ExitFormState,
   sliceIsoDate,
 } from './backtestFormConfig'
-
-const STORAGE_KEY = 'pxt.backtestPresets.v1'
-const MAX_PRESETS = 50
 
 export interface BacktestPreset {
   id: string
@@ -42,59 +42,20 @@ function mergeExitPolicy(raw: unknown): ExitFormState {
   return { ...EMPTY_EXIT_FORM, ...(raw as Partial<ExitFormState>) }
 }
 
-function readRaw(): BacktestPreset[] {
-  try {
-    const s = localStorage.getItem(STORAGE_KEY)
-    if (!s) return []
-    const a = JSON.parse(s) as unknown
-    if (!Array.isArray(a)) return []
-    const out: BacktestPreset[] = []
-    for (const x of a) {
-      const p = normalizePreset(x)
-      if (p) out.push(p)
-    }
-    return out
-  } catch {
-    return []
-  }
-}
-
-function normalizePreset(x: unknown): BacktestPreset | null {
-  if (!x || typeof x !== 'object') return null
-  const o = x as Record<string, unknown>
-  if (typeof o.id !== 'string' || typeof o.name !== 'string') return null
-  if (typeof o.strategy_id !== 'string' || typeof o.start_date !== 'string' || typeof o.end_date !== 'string') {
-    return null
-  }
-  if (typeof o.symbols !== 'string' || typeof o.initial_capital !== 'number') return null
-  if (typeof o.parametersJson !== 'string') return null
-  const createdAt = typeof o.createdAt === 'string' ? o.createdAt : new Date().toISOString()
+/** Map API row to UI model (parameters kept as JSON string for forms). */
+export function dtoToPreset(d: BacktestPresetDto): BacktestPreset {
   return {
-    id: o.id,
-    name: o.name,
-    createdAt,
-    strategy_id: o.strategy_id,
-    start_date: o.start_date,
-    end_date: o.end_date,
-    symbols: o.symbols,
-    initial_capital: o.initial_capital,
-    parametersJson: o.parametersJson,
-    exitPolicy: mergeExitPolicy(o.exitPolicy),
+    id: d.id,
+    name: d.name,
+    createdAt: d.created_at,
+    strategy_id: d.strategy_id,
+    start_date: d.start_date,
+    end_date: d.end_date,
+    symbols: d.symbols,
+    initial_capital: d.initial_capital,
+    parametersJson: JSON.stringify(d.parameters ?? {}, null, 2),
+    exitPolicy: mergeExitPolicy(d.exit_policy_form),
   }
-}
-
-function writeRaw(presets: BacktestPreset[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(presets))
-}
-
-export function listPresets(): BacktestPreset[] {
-  return readRaw().sort(
-    (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-  )
-}
-
-export function getPreset(id: string): BacktestPreset | undefined {
-  return readRaw().find(p => p.id === id)
 }
 
 export function applyPreset(p: BacktestPreset): BacktestFormSnapshot {
@@ -137,25 +98,79 @@ export function snapshotFromBacktest(bt: Backtest): Omit<BacktestPreset, 'id' | 
   }
 }
 
-export function saveNewPreset(name: string, snapshot: Omit<BacktestPreset, 'id' | 'name' | 'createdAt'>): BacktestPreset {
-  const trimmed = name.trim()
-  if (!trimmed) {
-    throw new Error('预设名称不能为空')
-  }
-  const presets = readRaw()
-  if (presets.length >= MAX_PRESETS) {
-    throw new Error(`最多保存 ${MAX_PRESETS} 条预设，请先删除旧配置`)
-  }
-  const preset: BacktestPreset = {
-    id: crypto.randomUUID(),
-    name: trimmed.slice(0, 80),
-    createdAt: new Date().toISOString(),
-    ...snapshot,
-  }
-  writeRaw([preset, ...presets])
-  return preset
+function normalizeSymbolCsv(s: string): string {
+  return s
+    .split(',')
+    .map(x => x.trim().toUpperCase())
+    .filter(Boolean)
+    .sort()
+    .join(',')
 }
 
-export function deletePreset(id: string): void {
-  writeRaw(readRaw().filter(p => p.id !== id))
+function sortKeysDeep(obj: unknown): unknown {
+  if (obj === null || typeof obj !== 'object') return obj
+  if (Array.isArray(obj)) return obj.map(sortKeysDeep)
+  const o = obj as Record<string, unknown>
+  const out: Record<string, unknown> = {}
+  for (const k of Object.keys(o).sort()) {
+    const v = o[k]
+    if (v === undefined) continue
+    out[k] = sortKeysDeep(v)
+  }
+  return out
+}
+
+function jsonComparable(obj: unknown): string {
+  return JSON.stringify(sortKeysDeep(obj))
+}
+
+function sameInitialCapital(a: number, b: number): boolean {
+  const da = Number(a)
+  const db = Number(b)
+  if (!Number.isFinite(da) || !Number.isFinite(db)) return false
+  return Math.abs(da - db) < 1e-4
+}
+
+/** Match preset name if this backtest config equals a saved preset. */
+export function findMatchingPresetName(bt: Backtest, presets: BacktestPreset[]): string | null {
+  const snap = snapshotFromBacktest(bt)
+  const symSnap = normalizeSymbolCsv(snap.symbols)
+  const paramCmp = jsonComparable(bt.parameters ?? {})
+  const exitCmp = jsonComparable(snap.exitPolicy)
+
+  for (const p of presets) {
+    if (p.strategy_id !== snap.strategy_id) continue
+    if (p.start_date !== snap.start_date) continue
+    if (p.end_date !== snap.end_date) continue
+    if (normalizeSymbolCsv(p.symbols) !== symSnap) continue
+    if (!sameInitialCapital(snap.initial_capital, p.initial_capital)) continue
+    let presetParams: unknown
+    try {
+      presetParams = JSON.parse(p.parametersJson || '{}')
+    } catch {
+      continue
+    }
+    if (jsonComparable(presetParams) !== paramCmp) continue
+    if (jsonComparable(p.exitPolicy) !== exitCmp) continue
+    return p.name
+  }
+  return null
+}
+
+/** Build API create/update body from form snapshot + name (parse parameters JSON). */
+export function presetBodyFromSnapshot(
+  snap: Omit<BacktestPreset, 'id' | 'name' | 'createdAt'>,
+  name: string,
+): BacktestPresetCreateBody {
+  const parameters = parseParametersJson(snap.parametersJson)
+  return {
+    name: name.trim().slice(0, 80),
+    strategy_id: snap.strategy_id,
+    start_date: snap.start_date,
+    end_date: snap.end_date,
+    symbols: snap.symbols,
+    initial_capital: snap.initial_capital,
+    parameters,
+    exit_policy_form: { ...snap.exitPolicy } as Record<string, unknown>,
+  }
 }

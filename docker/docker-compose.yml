@@ -1,15 +1,39 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pxt
+      POSTGRES_USER: cx_user
+      POSTGRES_PASSWORD: cx_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Expose to host so local tools (uv run uvicorn, psql) can use localhost:5432. Change left port if 5432 is busy.
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cx_user -d pxt"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ..
       dockerfile: docker/Dockerfile.backend
     env_file: ../.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/pxt
+      # Overrides .env for in-container networking (localhost in .env is wrong inside the container)
+      DATABASE_URL: postgresql+asyncpg://cx_user:cx_pass@postgres:5432/pxt
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     volumes:
       - ../schwab_token.json:/app/schwab_token.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   frontend:
     build:
@@ -19,3 +43,6 @@ services:
       - "3000:80"
     depends_on:
       - backend
+
+volumes:
+  postgres_data:

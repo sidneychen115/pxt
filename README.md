@@ -201,15 +201,55 @@ Historical data is cached in PostgreSQL after the first fetch — repeated backt
 
 ## Docker Deployment
 
+The stack is defined in `docker/docker-compose.yml`: **PostgreSQL**, **FastAPI**, and **nginx** serving the built React app. The DB user, password, and database match the local development example (`cx_user` / `cx_pass` / `pxt`). Postgres is **not** published on the host port `5432` (so it does not conflict with a Postgres you may already run locally); the backend reaches it on the Docker network as hostname `postgres`. To expose `5432` on the host, use `docker/docker-compose.postgres.yml` or add a port mapping only when you need it.
+
+### Start
+
 ```bash
 cd docker
-docker compose up -d
+docker compose up -d --build
 ```
 
-The compose file starts PostgreSQL, the FastAPI backend, and the nginx-served React frontend. Set `POSTGRES_PASSWORD` in your environment before running.
+- **Dashboard (browser):** http://localhost:3000 — nginx proxies `/api/` and `/ws` to the backend container.
+- **Backend (direct):** http://localhost:8000 — same API as local `uvicorn`; optional for debugging or `/docs`.
 
-Backend: http://localhost:8000  
-Frontend: http://localhost:80
+### Environment in containers
+
+Compose sets overrides so in-container networking works; your repo `.env` is still loaded for secrets (`env_file`), but these matter for Docker:
+
+| Variable | Notes |
+|----------|--------|
+| `DATABASE_URL` | Set in Compose to `postgresql+asyncpg://cx_user:cx_pass@postgres:5432/pxt`. Do **not** use `localhost` as the DB host inside the backend container — use the `postgres` service name (as in Compose). |
+| `OLLAMA_BASE_URL` | Set to `http://host.docker.internal:11434` so the backend can reach Ollama on the **host** (Linux uses `extra_hosts: host-gateway`; macOS/Windows Docker Desktop usually resolve `host.docker.internal` without it). |
+
+### Migrations (Alembic)
+
+On a **new** Postgres volume the API will not start until tables exist — run this once before first use (or after pulling new migrations):
+
+```bash
+cd docker
+docker compose run --rm backend /app/.venv/bin/alembic upgrade head
+```
+
+### Optional: Schwab token file
+
+The backend mounts `schwab_token.json` from the repo root. Create an empty file if you do not use Schwab yet: `touch schwab_token.json`.
+
+### Postgres only (without app containers)
+
+```bash
+cd docker
+docker compose -f docker-compose.postgres.yml up -d
+```
+
+Use `DATABASE_URL=postgresql+asyncpg://cx_user:cx_pass@localhost:5432/pxt` on the host.
+
+### Health check
+
+```bash
+curl -s http://localhost:3000/api/system/health
+curl -s http://localhost:8000/api/system/health
+```
 
 ## Roadmap
 
