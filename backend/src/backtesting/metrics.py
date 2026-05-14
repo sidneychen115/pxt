@@ -43,6 +43,10 @@ class BacktestMetrics:
     final_equity: float
     trades: list[TradeRecord]
     equity_curve: pd.Series  # index=datetime, values=equity
+    # Buy-and-hold total return of benchmark over the equity curve window, if computed.
+    benchmark_total_return: float | None = None
+    # Strategy total return minus benchmark buy-and-hold return (same window).
+    alpha_vs_benchmark: float | None = None
 
     @property
     def total_return(self) -> float:

@@ -17,8 +17,9 @@ class YFinanceProvider(DataProvider):
     ) -> pd.DataFrame:
         interval = YFINANCE_INTERVALS.get(timeframe, "1d")
         loop = asyncio.get_running_loop()
-        intraday_intervals = {"1m", "5m", "15m", "30m", "1h"}
-        fmt = "%Y-%m-%dT%H:%M:%S" if interval in intraday_intervals else "%Y-%m-%d"
+        # yfinance.download expects YYYY-MM-DD for start/end (all intervals). ISO datetimes with
+        # "T" or times can raise "unconverted data remains" and return empty intraday data.
+        fmt = "%Y-%m-%d"
         df = await loop.run_in_executor(
             None,
             partial(

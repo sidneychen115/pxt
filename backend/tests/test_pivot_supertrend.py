@@ -1,7 +1,12 @@
 import numpy as np
 import pandas as pd
 import pytest
-from src.strategies.library.pivot_supertrend import _detect_pivots, PivotSupertrendStrategy
+from src.strategies.library.pivot_supertrend import (
+    _atr_regime_passes,
+    _detect_pivots,
+    _volume_confirms_flip,
+    PivotSupertrendStrategy,
+)
 from src.strategies.base import DataContext
 
 
@@ -211,3 +216,36 @@ async def test_custom_parameters_accepted(strategy):
         ["SPY"], {"pivot_period": 3, "atr_factor": 2.0, "atr_period": 14}, ctx
     )
     assert isinstance(signals, list)
+
+
+@pytest.mark.parametrize("symbol", ["SPY", "QQQ", "AAPL"])
+@pytest.mark.parametrize("timeframe", ["1d"])
+async def test_generate_signals_matrix_no_crash(strategy, symbol, timeframe):
+    """Sanity: strategy runs across symbols/timeframes on synthetic data."""
+    ctx = MockDataContext(make_bullish_flip_df())
+    signals = await strategy.generate_signals(
+        [symbol],
+        {"timeframe": timeframe, "use_benchmark_long_filter": False},
+        ctx,
+    )
+    assert isinstance(signals, list)
+
+
+def test_atr_regime_passes_logic():
+    atr = pd.Series([1.0] * 25)
+    atr.iloc[-1] = 0.5
+    assert not _atr_regime_passes(
+        atr, enabled=True, regime_period=20, min_ratio=0.85, max_ratio=None
+    )
+    atr2 = pd.Series([1.0] * 25)
+    atr2.iloc[-1] = 1.0
+    assert _atr_regime_passes(
+        atr2, enabled=True, regime_period=20, min_ratio=0.85, max_ratio=None
+    )
+
+
+def test_volume_confirms_flip():
+    df = pd.DataFrame({"volume": [100.0] * 19 + [500.0]})
+    assert _volume_confirms_flip(df, vol_period=10, mult=1.0)
+    df2 = pd.DataFrame({"volume": [100.0] * 20})
+    assert not _volume_confirms_flip(df2, vol_period=10, mult=1.5)

@@ -5,7 +5,12 @@ export interface Strategy {
   is_active: boolean
   symbols: string[]
   timeframes: string[]
+  /** Legacy column; scheduling uses run_interval_minutes from timeframes. */
   run_frequency: string
+  /** Minutes between live runs; equals the smallest selected timeframe. */
+  run_interval_minutes?: number
+  /** Timeframe that sets run_interval_minutes (shortest bar). */
+  run_anchor_timeframe?: string
   parameters: Record<string, unknown>
   max_symbols: number
 }
@@ -34,6 +39,11 @@ export interface ExitPolicy {
   take_profit_abs?: number | null
   trailing_stop_pct?: number | null
   trailing_activate_pct?: number | null
+  /** Bar semantics for opening / signal generation (also passed into strategy parameters when set). Default close. */
+  entry_price_check_mode?: 'close' | 'ohlc'
+  /** Bar semantics for stop / take-profit / trailing on open positions. Default ohlc. */
+  exit_price_check_mode?: 'close' | 'ohlc'
+  /** @deprecated Old API: mapped server-side to exit_price_check_mode */
   price_check_mode?: 'close' | 'ohlc'
   /** When true, ignore strategy SELL signals (exits only via exit rules or end of test). */
   disable_sell_signal?: boolean
@@ -54,6 +64,10 @@ export interface Backtest {
   progress_phase?: BacktestProgressPhase | null
   /** Human-readable detail, e.g. symbol (2/5) */
   progress_message?: string | null
+  /** Last server-side progress heartbeat (ISO); running jobs should advance periodically */
+  progress_updated_at?: string | null
+  /** Populated when status is failed */
+  error_message?: string | null
   total_return: number | null
   annualized_return: number | null
   sharpe_ratio: number | null
@@ -62,6 +76,10 @@ export interface Backtest {
   profit_factor: number | null
   total_trades: number | null
   avg_hold_days: number | null
+  /** Buy-and-hold return of benchmark (e.g. SPY) over the backtest window */
+  benchmark_total_return: number | null
+  /** Strategy total return minus benchmark buy-and-hold */
+  alpha_vs_benchmark: number | null
   llm_evaluation: string | null
   llm_model: string | null
   created_at: string

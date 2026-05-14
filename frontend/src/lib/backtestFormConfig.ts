@@ -7,7 +7,8 @@ export const EMPTY_EXIT_FORM = {
   take_profit_abs: '',
   trailing_stop_pct: '',
   trailing_activate_pct: '',
-  price_check_mode: 'close' as 'close' | 'ohlc',
+  entry_price_check_mode: 'close' as 'close' | 'ohlc',
+  exit_price_check_mode: 'ohlc' as 'close' | 'ohlc',
   disable_sell_signal: false,
 }
 
@@ -21,7 +22,8 @@ export function exitPolicyFromForm(exitPolicy: ExitFormState): ExitPolicy | null
     take_profit_abs: exitPolicy.take_profit_abs !== '' ? parseFloat(exitPolicy.take_profit_abs) : null,
     trailing_stop_pct: exitPolicy.trailing_stop_pct !== '' ? parseFloat(exitPolicy.trailing_stop_pct) / 100 : null,
     trailing_activate_pct: exitPolicy.trailing_activate_pct !== '' ? parseFloat(exitPolicy.trailing_activate_pct) / 100 : null,
-    price_check_mode: exitPolicy.price_check_mode,
+    entry_price_check_mode: exitPolicy.entry_price_check_mode,
+    exit_price_check_mode: exitPolicy.exit_price_check_mode,
     disable_sell_signal: exitPolicy.disable_sell_signal,
   }
   const hasNumeric = !!(
@@ -45,7 +47,12 @@ export function exitPolicyToForm(ep: ExitPolicy | null | undefined): ExitFormSta
     take_profit_abs: absStr(ep.take_profit_abs),
     trailing_stop_pct: pctStr(ep.trailing_stop_pct),
     trailing_activate_pct: pctStr(ep.trailing_activate_pct),
-    price_check_mode: ep.price_check_mode === 'ohlc' ? 'ohlc' : 'close',
+    entry_price_check_mode:
+      ep.entry_price_check_mode === 'ohlc' ? 'ohlc' : 'close',
+    exit_price_check_mode: (() => {
+      const v = ep.exit_price_check_mode ?? ep.price_check_mode
+      return v === 'close' ? 'close' : 'ohlc'
+    })(),
     disable_sell_signal: ep.disable_sell_signal ?? false,
   }
 }
@@ -64,7 +71,9 @@ export function exitPolicyForRerun(ep: ExitPolicy | null | undefined): ExitPolic
     take_profit_abs: ep.take_profit_abs ?? null,
     trailing_stop_pct: ep.trailing_stop_pct ?? null,
     trailing_activate_pct: ep.trailing_activate_pct ?? null,
-    price_check_mode: ep.price_check_mode ?? 'close',
+    entry_price_check_mode: ep.entry_price_check_mode ?? 'close',
+    exit_price_check_mode:
+      ep.exit_price_check_mode ?? ep.price_check_mode ?? 'ohlc',
     disable_sell_signal: ep.disable_sell_signal ?? false,
   }
 }

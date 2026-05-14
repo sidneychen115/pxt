@@ -29,6 +29,24 @@ class _BuyOnceStrategy(BaseStrategy):
         return []
 
 
+async def test_stop_loss_close_mode_gap_fill_at_open():
+    """Protective stop: when price gaps through the stop, fill at next bar open (market stop behavior)."""
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 102, 99, 101),
+        (101, 102, 88, 89),
+        (65, 66, 64, 65),
+    ])
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(stop_loss_pct=0.10, exit_price_check_mode="close"),
+    )
+    metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "stop_loss"
+    assert trade.exit_price == pytest.approx(65.0)
+
+
 async def test_stop_loss_pct_close():
     # Buy fills at t1 open=100. SL=5% → stop at 95.
     # t2: close=93 < 95 → SL queued. t3: fill at open=92.
@@ -40,7 +58,7 @@ async def test_stop_loss_pct_close():
     ])
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(stop_loss_pct=0.05),
+        exit_policy=ExitPolicy(stop_loss_pct=0.05, exit_price_check_mode="close"),
     )
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     assert len(metrics.trades) == 1
@@ -74,7 +92,7 @@ async def test_stop_loss_abs_close():
 
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(stop_loss_abs=200.0),
+        exit_policy=ExitPolicy(stop_loss_abs=200.0, exit_price_check_mode="close"),
     )
     metrics = await engine.run(_BuyFixedQtyStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     trade = metrics.trades[0]
@@ -92,12 +110,51 @@ async def test_stop_loss_ohlc():
     ])
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(stop_loss_pct=0.05, price_check_mode="ohlc"),
+        exit_policy=ExitPolicy(stop_loss_pct=0.05, exit_price_check_mode="ohlc"),
     )
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     trade = metrics.trades[0]
     assert trade.exit_reason == "stop_loss"
     assert trade.exit_price == pytest.approx(95.0)
+
+
+async def test_stop_loss_pct_caps_looser_strategy_stop_price():
+    """When signal.stop_price is wider than exit_policy, policy caps max loss (long: higher stop wins)."""
+    class _BuyWideStratStop(BaseStrategy):
+        name = "_test_wide_signal_stop"
+
+        def __init__(self):
+            self._done = False
+
+        async def generate_signals(self, symbols, parameters, ctx, portfolio=None):
+            sym = symbols[0]
+            bars = await ctx.get_bars(sym, "1d")
+            if len(bars) == 0 and not self._done:
+                self._done = True
+                return [
+                    TradeSignal(
+                        symbol=sym,
+                        direction="buy",
+                        order_type="market",
+                        stop_price=85.0,
+                        reasoning="test",
+                    )
+                ]
+            return []
+
+    bars = make_bars([
+        (100, 101, 99, 100),
+        (100, 102, 99, 101),
+        (101, 102, 89, 91),
+    ])
+    engine = BacktestEngine(
+        initial_capital=10_000,
+        exit_policy=ExitPolicy(stop_loss_pct=0.10, exit_price_check_mode="ohlc"),
+    )
+    metrics = await engine.run(_BuyWideStratStop(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
+    trade = metrics.trades[0]
+    assert trade.exit_reason == "stop_loss"
+    assert trade.exit_price == pytest.approx(90.0)
 
 
 async def test_no_policy_behavior_unchanged():
@@ -124,7 +181,7 @@ async def test_take_profit_pct_close():
     ])
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(take_profit_pct=0.15),
+        exit_policy=ExitPolicy(take_profit_pct=0.15, exit_price_check_mode="close"),
     )
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     trade = metrics.trades[0]
@@ -156,7 +213,7 @@ async def test_take_profit_abs_close():
 
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(take_profit_abs=200.0),
+        exit_policy=ExitPolicy(take_profit_abs=200.0, exit_price_check_mode="close"),
     )
     metrics = await engine.run(_BuyFixedQtyStrategy2(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     trade = metrics.trades[0]
@@ -174,7 +231,7 @@ async def test_take_profit_ohlc():
     ])
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(take_profit_pct=0.15, price_check_mode="ohlc"),
+        exit_policy=ExitPolicy(take_profit_pct=0.15, exit_price_check_mode="ohlc"),
     )
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     trade = metrics.trades[0]
@@ -197,7 +254,7 @@ async def test_trailing_stop_immediate():
     ])
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(trailing_stop_pct=0.05),
+        exit_policy=ExitPolicy(trailing_stop_pct=0.05, exit_price_check_mode="close"),
     )
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     trade = metrics.trades[0]
@@ -218,7 +275,7 @@ async def test_trailing_stop_ohlc():
     ])
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(trailing_stop_pct=0.05, price_check_mode="ohlc"),
+        exit_policy=ExitPolicy(trailing_stop_pct=0.05, exit_price_check_mode="ohlc"),
     )
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     trade = metrics.trades[0]
@@ -241,7 +298,11 @@ async def test_trailing_stop_with_activate():
     ])
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(trailing_stop_pct=0.05, trailing_activate_pct=0.10),
+        exit_policy=ExitPolicy(
+            trailing_stop_pct=0.05,
+            trailing_activate_pct=0.10,
+            exit_price_check_mode="close",
+        ),
     )
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     trade = metrics.trades[0]
@@ -265,7 +326,11 @@ async def test_tp_activates_trailing():
     ])
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(take_profit_pct=0.15, trailing_stop_pct=0.05),
+        exit_policy=ExitPolicy(
+            take_profit_pct=0.15,
+            trailing_stop_pct=0.05,
+            exit_price_check_mode="close",
+        ),
     )
     metrics = await engine.run(_BuyOnceStrategy(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     assert len(metrics.trades) == 1
@@ -302,7 +367,7 @@ async def test_policy_beats_signal_same_bar():
 
     engine = BacktestEngine(
         initial_capital=10_000,
-        exit_policy=ExitPolicy(stop_loss_pct=0.05),
+        exit_policy=ExitPolicy(stop_loss_pct=0.05, exit_price_check_mode="close"),
     )
     metrics = await engine.run(_BuyThenSellAt2(), ["AAPL"], {}, {"AAPL": {"1d": bars}}, "1d")
     assert len(metrics.trades) == 1

@@ -26,12 +26,13 @@ class MovingAverageCrossover(BaseStrategy):
     ) -> list[TradeSignal]:
         fast = parameters.get("fast", self.default_parameters["fast"])
         slow = parameters.get("slow", self.default_parameters["slow"])
+        tf = parameters.get("timeframe") or self.default_timeframes[0]
         signals: list[TradeSignal] = []
 
         for symbol in symbols:
             if not symbol:
                 continue
-            df = await ctx.get_bars(symbol, "1d", limit=max(fast, slow) + 10)
+            df = await ctx.get_bars(symbol, tf, limit=max(fast, slow) + 10)
             if df is None or len(df) < slow + 2:
                 continue
 

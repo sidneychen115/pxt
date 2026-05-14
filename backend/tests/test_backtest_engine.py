@@ -75,6 +75,47 @@ async def test_look_ahead_prevention():
     assert all(result.index < cutoff)
 
 
+async def test_inclusive_context_includes_current_bar():
+    from src.backtesting.data_context import BacktestDataContext
+    idx = pd.date_range("2023-01-02", periods=10, freq="B", tz="UTC")
+    df = pd.DataFrame({"open": range(10), "high": range(10), "low": range(10),
+                       "close": range(10), "volume": [100] * 10}, index=idx)
+    data = {"SPY": {"1d": df}}
+    ctx = BacktestDataContext(data, idx[4], inclusive_end=True)
+    result = await ctx.get_bars("SPY", "1d", limit=200)
+    assert len(result) == 5
+    assert result.index.max() == idx[4]
+
+
+class _BuyWhenTwoDailyBarsStrategy(BaseStrategy):
+    id = "test_buy_two_bars"
+    name = "Buy when >=2 daily bars visible"
+
+    async def generate_signals(self, symbols, parameters, ctx, portfolio=None):
+        sym = symbols[0]
+        bars = await ctx.get_bars(sym, "1d", limit=500)
+        if len(bars) >= 2:
+            return [TradeSignal(sym, "buy", "market", quantity=1)]
+        return []
+
+
+async def test_same_close_fills_at_signal_bar_close():
+    idx = pd.date_range("2023-01-02", periods=4, freq="B", tz="UTC")
+    closes = [100.0, 101.0, 102.0, 105.0]
+    df = pd.DataFrame({
+        "open": closes, "high": closes, "low": closes, "close": closes,
+        "volume": [1000] * 4,
+    }, index=idx)
+    data = {"SPY": {"1d": df}}
+    strat = _BuyWhenTwoDailyBarsStrategy()
+    engine = BacktestEngine(initial_capital=10_000, fill_mode="same_close")
+    metrics = await engine.run(strat, ["SPY"], {}, data, "1d")
+    assert len(metrics.trades) >= 1
+    t = metrics.trades[0]
+    assert t.entry_price == pytest.approx(101.0)
+    assert t.entry_time == idx[1]
+
+
 async def test_disable_sell_signal_skips_strategy_sell():
     engine = BacktestEngine(
         initial_capital=10_000,

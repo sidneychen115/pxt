@@ -6,17 +6,20 @@ from src.strategies.base import DataContext
 class BacktestDataContext(DataContext):
     """
     Injects pre-loaded historical data sliced at current_time.
-    Prevents look-ahead: strategy only sees bars with bar_time < current_time.
-    Orders fill at next bar's open price (not current close).
+    By default prevents look-ahead: strategy only sees bars with bar_time < current_time.
+    With ``inclusive_end=True`` (same-bar-close fill mode), bars with index <= current_time
+    are visible so the signal can use the decision bar's OHLC.
     """
 
     def __init__(
         self,
         data: dict[str, dict[str, pd.DataFrame]],  # {symbol: {timeframe: df}}
         current_time: datetime,
+        inclusive_end: bool = False,
     ):
         self._data = data
         self._current_time = current_time
+        self._inclusive_end = inclusive_end
 
     def advance(self, new_time: datetime) -> None:
         self._current_time = new_time
@@ -27,7 +30,10 @@ class BacktestDataContext(DataContext):
         df = self._data.get(symbol, {}).get(timeframe)
         if df is None or df.empty:
             return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
-        past = df[df.index < self._current_time]
+        if self._inclusive_end:
+            past = df[df.index <= self._current_time]
+        else:
+            past = df[df.index < self._current_time]
         return past.tail(limit)
 
     async def get_option_chain(self, underlying, expiry=None) -> pd.DataFrame:

@@ -199,6 +199,82 @@ curl -X POST http://localhost:8000/api/backtests/ \
 
 Historical data is cached in PostgreSQL after the first fetch — repeated backtests over the same date range run entirely from local data.
 
+### Optional request fields (not inside `parameters` JSON)
+
+| Field | Purpose |
+|-------|---------|
+| `exit_policy` | Optional object: stop/take-profit/trailing, `entry_price_check_mode` / `exit_price_check_mode` (`close` \| `ohlc`), `disable_sell_signal`. Sent from the dashboard **Exit Rules** block; merged into strategy `run_params` when present. Does **not** set the backtest engine fill price by itself. |
+
+### Optional `parameters` (JSON) — engine & all strategies
+
+These keys live in the POST body `parameters` object (dashboard: **策略参数 JSON**). They are merged with each strategy’s `default_parameters` and with server-side defaults where noted.
+
+| Key | Type | Default | Applies to | Notes |
+|-----|------|---------|--------------|-------|
+| `timeframe` | string | Strategy / DB strategy row | All | Bar size (e.g. `1d`, `1h`). Used for data load and passed into `run_params`. |
+| `backtest_fill_mode` | string | Strategy class attribute, else `next_open` | All | `next_open` — fills at the **next** bar’s open after the signal bar. `same_close` — fills at the **signal** bar’s **close**. Class default wins when omitted (e.g. `ha_month_week_band` uses `same_close`). |
+| `benchmark_symbol` | string | `SPY` | All completed backtests | Benchmark buy-and-hold and alpha vs benchmark in results. |
+
+### Strategy-specific `parameters`
+
+Built-in strategies live under `backend/src/strategies/library/`. Their `id` is the `strategy_id` in API requests.
+
+#### `ma_crossover` — Moving Average Crossover
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `fast` | int | `10` | Fast EMA period. |
+| `slow` | int | `30` | Slow EMA period. |
+| `timeframe` | string | `1d` (from `default_timeframes[0]`) | Bar series for signals. |
+
+#### `ha_month_week_band` — HA Month Open vs Weekly Close (band)
+
+Uses helpers in `backend/src/strategies/heikin_ashi.py` (no extra JSON keys there — only strategy params below).
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `timeframe` | string | `1d` | Designed for daily bars. |
+| `band_pct` | float | `0.0` | Symmetric band: `delta = abs(benchmark) * band_pct + band_abs`. |
+| `band_abs` | float | `0.0` | Absolute band width added to benchmark. |
+| `backtest_fill_mode` | string | `same_close` | Class default; aligns fills with signal bar close. Override to `next_open` if you want next-bar open fills. |
+
+#### `adaptive_turtle` — Adaptive Turtle (Donchian)
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `fast_period` | int | `20` | Donchian **entry** channel (break above prior N-day high). |
+| `slow_period` | int | `10` | Donchian **exit** channel (break below prior M-day low). |
+| `benchmark_symbol` | string | `SPY` | Trend filter: longs only when benchmark close > its MA. Include this symbol in `symbols` if you use the filter. |
+| `benchmark_ma_period` | int | `200` | MA length on benchmark closes. |
+| `atr_period` | int | `20` | ATR lookback for optional position sizing. |
+| `dollar_risk_pct` | float | `0.01` | Turtle-style risk fraction of **equity** per entry (0 = use engine default sizing). Capped at `0.25`. |
+| `account_equity` | float | `100000` | Used when `portfolio` is absent (e.g. live) for sizing / risk. |
+| `account_cash` | float | same as equity | Live cash cap for sizing. |
+
+Backtest bar stream for this strategy is **daily** (`1d`) in code regardless of `timeframe` in parameters.
+
+#### `pivot_supertrend` — Pivot Point SuperTrend
+
+| Key | Type | Default | Notes |
+|-----|------|---------|-------|
+| `pivot_period` | int | `2` | Pivot lookback. |
+| `atr_factor` | float | `3.0` | SuperTrend ATR multiplier. |
+| `atr_period` | int | `10` | ATR length. |
+| `timeframe` | string | `1d` | Bars for signals. |
+| `benchmark_symbol` | string | `SPY` | Optional long filter; include in `symbols` when enabled. |
+| `benchmark_ma_period` | int | `200` | Benchmark MA period. |
+| `use_benchmark_long_filter` | bool | `true` | Require benchmark > MA before new longs. |
+| `use_atr_regime_filter` | bool | `false` | Filter on ATR vs its moving average. |
+| `atr_regime_period` | int | `20` | MA period on ATR for regime filter. |
+| `min_atr_vs_ma_ratio` | float | `0.85` | Minimum ATR / ATR-MA ratio. |
+| `max_atr_vs_ma_ratio` | float \| null | `null` | Maximum ratio; `null` = no upper cap. |
+| `volume_ma_period` | int | `20` | Volume SMA period. |
+| `volume_confirm_mult` | float | `0.0` | Require last volume ≥ mult × SMA; `0` disables. |
+| `dollar_risk_pct` | float | `0.0` | Same semantics as Adaptive Turtle (`0` = engine default sizing). |
+| `use_supertrend_stop_price` | bool | `true` | Pass SuperTrend level as `stop_price` on buys for exit-policy interaction. |
+| `account_equity` | float | `100000` | Live sizing when portfolio missing. |
+| `account_cash` | float | same as equity | Live cash cap. |
+
 ## Docker Deployment
 
 The stack is defined in `docker/docker-compose.yml`: **PostgreSQL**, **FastAPI**, and **nginx** serving the built React app. The DB user, password, and database match the local development example (`cx_user` / `cx_pass` / `pxt`). Postgres is **not** published on the host port `5432` (so it does not conflict with a Postgres you may already run locally); the backend reaches it on the Docker network as hostname `postgres`. To expose `5432` on the host, use `docker/docker-compose.postgres.yml` or add a port mapping only when you need it.

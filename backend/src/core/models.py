@@ -152,17 +152,22 @@ class Backtest(Base):
     profit_factor: Mapped[Decimal | None] = mapped_column(Numeric(8, 4))
     total_trades: Mapped[int | None] = mapped_column(Integer)
     avg_hold_days: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    benchmark_total_return: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    alpha_vs_benchmark: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     llm_evaluation: Mapped[str | None] = mapped_column(Text)
     llm_model: Mapped[str | None] = mapped_column(String(50))
     error_message: Mapped[str | None] = mapped_column(Text)
     progress_phase: Mapped[str | None] = mapped_column(String(32))
     progress_message: Mapped[str | None] = mapped_column(Text)
+    progress_updated_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMPTZ)
     exit_policy: Mapped[dict | None] = mapped_column(JSONB)
 
     trades: Mapped[list["BacktestTrade"]] = relationship(back_populates="backtest")
     equity_curve: Mapped[list["BacktestEquityCurve"]] = relationship(back_populates="backtest")
+
+    __table_args__ = (Index("idx_backtests_created_at", "created_at"),)
 
 
 class BacktestTrade(Base):
@@ -216,7 +221,7 @@ class BacktestConfigPreset(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
-    strategy_id: Mapped[str] = mapped_column(String(50), ForeignKey("strategies.id"), nullable=False)
+    strategy_id: Mapped[str | None] = mapped_column(String(50), ForeignKey("strategies.id"), nullable=True)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     symbols: Mapped[str] = mapped_column(Text, nullable=False)

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 from sqlalchemy.engine.url import make_url
 from src.core.config import settings
@@ -11,6 +12,7 @@ from src.core.database import async_session_factory
 from src.core.models import Strategy, SystemEvent
 from src.strategies.live_context import LiveDataContext
 from src.strategies.registry import REGISTRY, discover_strategies
+from src.scheduler.timeframe_interval import anchor_timeframe, min_interval_minutes
 from src.data.collector import DataCollector
 from src.signals.processor import SignalProcessor
 
@@ -85,14 +87,21 @@ class StrategyScheduler:
         if config.id not in REGISTRY:
             logger.warning("Strategy '%s' in DB but not in registry — skipping.", config.id)
             return
+        interval_m = min_interval_minutes(list(config.timeframes or []))
+        anchor_tf = anchor_timeframe(list(config.timeframes or []))
         self._scheduler.add_job(
             self._run_strategy,
-            CronTrigger.from_crontab(config.run_frequency, timezone=TZ),
+            IntervalTrigger(minutes=interval_m, timezone=TZ),
             kwargs={"strategy_id": config.id},
             id=f"strategy_{config.id}",
             replace_existing=True,
         )
-        logger.info("Registered strategy job: %s @ %s", config.id, config.run_frequency)
+        logger.info(
+            "Registered strategy job: %s every %s min (anchor TF %s)",
+            config.id,
+            interval_m,
+            anchor_tf,
+        )
 
     async def reload_strategy(self, strategy_id: str) -> None:
         """Hot-reload a single strategy job after config change."""
@@ -132,10 +141,13 @@ class StrategyScheduler:
 
             strategy = REGISTRY[strategy_id]()
             ctx = LiveDataContext(session)
+            run_params = dict(config.parameters or {})
+            if config.timeframes:
+                run_params.setdefault("timeframe", config.timeframes[0])
             try:
                 async with asyncio.timeout(settings.strategy_run_timeout):
                     signals = await strategy.generate_signals(
-                        config.symbols, config.parameters, ctx, portfolio=None
+                        config.symbols, run_params, ctx, portfolio=None
                     )
                 await self._save_signals(session, config, signals)
                 await self._log_event(

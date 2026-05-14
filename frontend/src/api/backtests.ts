@@ -4,8 +4,9 @@ import type { Backtest, BacktestTrade, EquityPoint, ExitPolicy } from '../types'
 export const fetchBacktests = (strategy_id?: string) =>
   client.get<Backtest[]>('/backtests/', { params: { strategy_id } }).then(r => r.data)
 
+/** Longer timeout: detail GET can queue behind a CPU-heavy backtest on the same uvicorn worker. */
 export const fetchBacktest = (id: number) =>
-  client.get<Backtest>(`/backtests/${id}`).then(r => r.data)
+  client.get<Backtest>(`/backtests/${id}`, { timeout: 600_000 }).then(r => r.data)
 
 export const triggerBacktest = (data: {
   strategy_id: string

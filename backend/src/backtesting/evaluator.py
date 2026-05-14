@@ -31,6 +31,13 @@ class LLMEvaluator:
         profit_factor_str = (
             f"{metrics.profit_factor:.2f}" if metrics.profit_factor is not None else "N/A (no losing trades)"
         )
+        bench_block = ""
+        if metrics.benchmark_total_return is not None and metrics.alpha_vs_benchmark is not None:
+            bench_block = (
+                f"- Benchmark buy-and-hold return: {metrics.benchmark_total_return:.2%}\n"
+                f"- Alpha vs benchmark: {metrics.alpha_vs_benchmark:.2%}\n"
+            )
+
         prompt = f"""You are an expert quantitative analyst. Evaluate the following trading strategy backtest results.
 
 Strategy: {strategy_name}
@@ -45,7 +52,7 @@ Backtest Results:
 - Profit Factor: {profit_factor_str}
 - Total Trades: {metrics.total_trades}
 - Avg Hold Days: {metrics.avg_hold_days:.1f}
-
+{bench_block}
 Please provide:
 1. Overall assessment of the strategy's risk-adjusted performance
 2. Notable strengths (if any)

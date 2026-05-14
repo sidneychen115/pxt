@@ -1,6 +1,8 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
+
 import pandas as pd
 from src.strategies.base import BaseStrategy, PortfolioSnapshot, TradeSignal
 from src.backtesting.data_context import BacktestDataContext
@@ -21,9 +23,17 @@ MAX_SIGNAL_ROUNDS_PER_BAR = 64
 
 
 class BacktestEngine:
-    def __init__(self, initial_capital: float = 100_000.0, exit_policy: ExitPolicy | None = None):
+    def __init__(
+        self,
+        initial_capital: float = 100_000.0,
+        exit_policy: ExitPolicy | None = None,
+        fill_mode: str = "next_open",
+    ):
         self._capital = initial_capital
         self._exit_policy = exit_policy
+        if fill_mode not in ("next_open", "same_close"):
+            raise ValueError("fill_mode must be 'next_open' or 'same_close'")
+        self._fill_mode = fill_mode
 
     def _try_execute_signal(
         self,
@@ -35,17 +45,28 @@ class BacktestEngine:
         data: dict[str, dict[str, pd.DataFrame]],
         timeframe: str,
         next_time: datetime,
+        current_time: datetime | None = None,
     ) -> tuple[bool, float]:
-        """Execute one signal at next bar's open. Returns (filled, new_cash). Mutates positions/closed_trades."""
+        """Execute one signal. ``next_open`` fills at next bar's open; ``same_close`` at current bar's close."""
         sym = sig.symbol
         next_df = data.get(sym, {}).get(timeframe)
         if next_df is None:
             return False, cash
-        future = next_df[next_df.index >= next_time]
-        if future.empty:
-            return False, cash
-        fill_price = float(future["open"].iloc[0])
-        fill_time = future.index[0]
+
+        if self._fill_mode == "same_close":
+            if current_time is None:
+                return False, cash
+            bar = next_df[next_df.index == current_time]
+            if bar.empty:
+                return False, cash
+            fill_price = float(bar["close"].iloc[0])
+            fill_time = current_time
+        else:
+            future = next_df[next_df.index >= next_time]
+            if future.empty:
+                return False, cash
+            fill_price = float(future["open"].iloc[0])
+            fill_time = future.index[0]
 
         if sig.direction == "buy" and sym not in positions:
             qty = sig.quantity or max(1, int(cash * 0.1 / fill_price))
@@ -57,10 +78,21 @@ class BacktestEngine:
                     entry_time=fill_time, entry_price=fill_price,
                     entry_signal={"reasoning": sig.reasoning},
                 )
+                # Long: stop price must be below entry. The *higher* the stop, the *tighter* the max loss.
+                # If both exit_policy and strategy (e.g. SuperTrend band) provide a stop, take max() so
+                # policy stop_loss_pct always caps risk; strategy can only tighten, not widen past policy.
+                strat_stop = float(sig.stop_price) if sig.stop_price is not None else None
+                policy_stop = self._compute_stop_price(fill_price, qty)
+                candidates: list[float] = []
+                if policy_stop is not None and policy_stop > 0 and policy_stop < fill_price:
+                    candidates.append(policy_stop)
+                if strat_stop is not None and strat_stop > 0 and strat_stop < fill_price:
+                    candidates.append(strat_stop)
+                initial_stop = max(candidates) if candidates else None
                 positions[sym] = _PositionState(
                     trade=trade,
                     peak_price=fill_price,
-                    stop_price=self._compute_stop_price(fill_price, qty),
+                    stop_price=initial_stop,
                     take_profit_price=self._compute_tp_price(fill_price, qty),
                 )
                 return True, new_cash
@@ -104,7 +136,9 @@ class BacktestEngine:
         ep = self._exit_policy
         if ep is None:
             return
-        check_price = float(bar["high"]) if ep.price_check_mode == "ohlc" else float(bar["close"])
+        check_price = (
+            float(bar["high"]) if ep.exit_price_check_mode == "ohlc" else float(bar["close"])
+        )
         state.peak_price = max(state.peak_price, check_price)
 
         if ep.trailing_stop_pct is not None and not state.trailing_active:
@@ -124,7 +158,7 @@ class BacktestEngine:
         ep = self._exit_policy
         if ep is None:
             return None
-        if ep.price_check_mode == "ohlc":
+        if ep.exit_price_check_mode == "ohlc":
             low = float(bar["low"])
             high = float(bar["high"])
             # Priority 1: stop loss
@@ -194,6 +228,8 @@ class BacktestEngine:
         parameters: dict,
         data: dict[str, dict[str, pd.DataFrame]],
         timeframe: str = "1d",
+        *,
+        bar_progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> BacktestMetrics:
         """Simulate strategy on historical data.
         data: {symbol: {timeframe: pd.DataFrame with DatetimeIndex}}
@@ -219,12 +255,23 @@ class BacktestEngine:
         closed_trades: list[TradeRecord] = []
         equity_series: dict[datetime, float] = {}
 
-        for i, current_time in enumerate(all_times[:-1]):
-            next_time = all_times[i + 1]
+        bar_indices = range(len(all_times)) if self._fill_mode == "same_close" else range(len(all_times) - 1)
+        bar_list = list(bar_indices)
+        n_bars = len(bar_list)
+        report_stride = max(1, min(2500, n_bars // 80)) if n_bars else 1
+
+        for step, i in enumerate(bar_list):
+            current_time = all_times[i]
+            next_time = all_times[i + 1] if i + 1 < len(all_times) else None
             # Cooperate with asyncio so polling can observe progress_phase while the engine runs.
             await asyncio.sleep(0)
+            if bar_progress and n_bars:
+                done = step + 1
+                if step == 0 or done == n_bars or done % report_stride == 0:
+                    await bar_progress(done, n_bars)
 
-            # Settle pending close-mode exits at this bar's open
+            # Settle pending close-mode exits at this bar's open (market stop: fill at open, including
+            # gap-through — consistent with a protective stop that executes when trading resumes).
             for sym, (reason, state) in list(pending_close_exits.items()):
                 bar_df = data.get(sym, {}).get(timeframe)
                 if bar_df is not None:
@@ -252,7 +299,7 @@ class BacktestEngine:
                     self._update_state(state, bar)
                     reason = self._check_exit(state, bar)
                     if reason:
-                        if self._exit_policy.price_check_mode == "ohlc":
+                        if self._exit_policy.exit_price_check_mode == "ohlc":
                             fill_price = self._ohlc_fill_price(state, reason)
                             state.trade.exit_time = current_time
                             state.trade.exit_price = fill_price
@@ -264,10 +311,11 @@ class BacktestEngine:
                             # Invariant: positions.pop(sym) is paired with adding to pending_close_exits
                             pending_close_exits[sym] = (reason, positions.pop(sym))
 
-            # Fill orders at next bar's open; recall strategy after each successful fill with updated cash.
+            # Strategy signals; recall after each successful fill with updated cash.
             round_i = 0
+            inclusive = self._fill_mode == "same_close"
             while round_i < MAX_SIGNAL_ROUNDS_PER_BAR:
-                ctx = BacktestDataContext(data, current_time)
+                ctx = BacktestDataContext(data, current_time, inclusive_end=inclusive)
                 equity = self._account_equity(cash, positions, data, timeframe, current_time)
                 snapshot = PortfolioSnapshot(
                     cash=cash, initial_capital=self._capital, equity=equity
@@ -284,7 +332,8 @@ class BacktestEngine:
                         closed_trades=closed_trades,
                         data=data,
                         timeframe=timeframe,
-                        next_time=next_time,
+                        next_time=next_time if next_time is not None else current_time,
+                        current_time=current_time,
                     )
                     if filled:
                         cash = new_cash
@@ -299,7 +348,10 @@ class BacktestEngine:
             for sym, state in positions.items():
                 tf_df = data.get(sym, {}).get(timeframe)
                 if tf_df is not None:
-                    past = tf_df[tf_df.index < next_time]
+                    if next_time is not None:
+                        past = tf_df[tf_df.index < next_time]
+                    else:
+                        past = tf_df[tf_df.index <= current_time]
                     if not past.empty:
                         portfolio_value += state.trade.quantity * float(past["close"].iloc[-1])
             equity_series[current_time] = portfolio_value

@@ -64,6 +64,7 @@ type BacktestSortKey =
   | 'strategy'
   | 'preset'
   | 'total_return'
+  | 'alpha'
   | 'annualized_return'
   | 'sharpe_ratio'
   | 'max_drawdown'
@@ -136,23 +137,57 @@ function phaseRank(p: BacktestProgressPhase | null | undefined): number {
   return i >= 0 ? i : -1
 }
 
+function formatRelativeUpdate(iso: string | null | undefined): string {
+  if (iso == null || iso === '') return ''
+  const t = new Date(iso).getTime()
+  if (Number.isNaN(t)) return ''
+  const sec = Math.max(0, Math.round((Date.now() - t) / 1000))
+  if (sec < 60) return `${sec} 秒前更新`
+  const min = Math.floor(sec / 60)
+  if (min < 120) return `${min} 分钟前更新`
+  const hr = Math.floor(min / 60)
+  return `${hr} 小时前更新`
+}
+
 /** Stale HTTP poll must not overwrite newer WebSocket progress while status is running. */
 function mergeRunningBacktestProgress(prev: Backtest | undefined, next: Backtest): Backtest {
   if (!prev || prev.id !== next.id) return next
   if (prev.status !== 'running' || next.status !== 'running') return next
   const pr = phaseRank(prev.progress_phase)
   const nr = phaseRank(next.progress_phase)
+  const prevTs = prev.progress_updated_at ? Date.parse(prev.progress_updated_at) : 0
+  const nextTs = next.progress_updated_at ? Date.parse(next.progress_updated_at) : 0
   if (pr > nr) {
     return {
       ...next,
       progress_phase: prev.progress_phase,
       progress_message: prev.progress_message ?? next.progress_message,
+      progress_updated_at:
+        prevTs >= nextTs ? prev.progress_updated_at : next.progress_updated_at,
+    }
+  }
+  if (prevTs > nextTs) {
+    return {
+      ...next,
+      progress_message: prev.progress_message ?? next.progress_message,
+      progress_updated_at: prev.progress_updated_at,
     }
   }
   return next
 }
 
 function BacktestProgressPanel({ bt }: { bt: Backtest }) {
+  const [tick, setTick] = useState(0)
+  useEffect(() => {
+    const id = window.setInterval(() => setTick((n) => n + 1), 5000)
+    return () => window.clearInterval(id)
+  }, [bt.progress_updated_at])
+
+  const relativeFreshness = useMemo(
+    () => formatRelativeUpdate(bt.progress_updated_at),
+    [bt.progress_updated_at, tick],
+  )
+
   const phaseIndex = useMemo(() => {
     if (!bt.progress_phase) return -1
     return PROGRESS_STEPS.findIndex(s => s.phase === bt.progress_phase)
@@ -194,6 +229,13 @@ function BacktestProgressPanel({ bt }: { bt: Backtest }) {
       <div className="text-sm text-gray-300 min-h-[1.25rem]">
         {bt.progress_message ?? (bt.status === 'running' ? '正在启动…' : '')}
       </div>
+      {bt.status === 'running' && (
+        <div className="text-xs text-gray-500">
+          {relativeFreshness || '等待首次进度上报…'}
+          <span className="text-gray-600"> · </span>
+          若长时间无更新且非 LLM 评估阶段，可能已卡死或进程已退出；超时后系统会自动标为失败。
+        </div>
+      )}
       <div className="h-1 w-full bg-gray-800 rounded-full overflow-hidden">
         <div
           className="h-full bg-yellow-600 transition-all duration-500 ease-out"
@@ -219,7 +261,13 @@ function BacktestList() {
   const navigate = useNavigate()
   const location = useLocation()
   const qc = useQueryClient()
-  const { data: backtests, isLoading } = useQuery({
+  const {
+    data: backtests,
+    isPending: backtestsPending,
+    isError: backtestsError,
+    error: backtestsErrorObj,
+    refetch: refetchBacktests,
+  } = useQuery({
     queryKey: ['backtests'],
     queryFn: () => fetchBacktests(),
   })
@@ -260,6 +308,8 @@ function BacktestList() {
           return presetLabel
         case 'total_return':
           return sortableNumber(bt.total_return)
+        case 'alpha':
+          return sortableNumber(bt.alpha_vs_benchmark)
         case 'annualized_return':
           return sortableNumber(bt.annualized_return)
         case 'sharpe_ratio':
@@ -502,14 +552,33 @@ function BacktestList() {
           )}
         </div>
       )}
-      {isLoading && <div className="text-gray-400">Loading...</div>}
+      {backtestsError && (
+        <div className="rounded-lg border border-red-900/60 bg-red-950/40 px-4 py-3 text-sm text-red-200 space-y-2">
+          <p>
+            无法加载回测列表：
+            {backtestsErrorObj instanceof Error ? backtestsErrorObj.message : '请求失败'}
+          </p>
+          <p className="text-xs text-red-300/90">
+            常见原因：浏览器访问的站点与后端 API 不通、数据库未就绪、或回测接口超时。请打开开发者工具 → Network
+            查看 <code className="text-red-100">/api/backtests/</code> 是否失败或挂起。
+          </p>
+          <button
+            type="button"
+            onClick={() => refetchBacktests()}
+            className="px-3 py-1.5 rounded bg-red-900/80 hover:bg-red-800 text-red-100 text-xs font-medium"
+          >
+            重试
+          </button>
+        </div>
+      )}
+      {backtestsPending && !backtestsError && <div className="text-gray-400">Loading...</div>}
       {sortRules.length > 1 && (
         <p className="text-xs text-gray-500 mb-2 px-1">
           多列排序按优先级：仅当左侧列的值并列时，才按下一列排序；两列数值都不同则顺序只由左侧列决定。
         </p>
       )}
       <div className="overflow-x-auto rounded-xl border border-gray-800 bg-gray-900/80">
-        <table className="min-w-[1200px] w-full text-sm text-left">
+        <table className="min-w-[1280px] w-full text-sm text-left">
           <thead>
             <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wide">
               {([
@@ -517,6 +586,7 @@ function BacktestList() {
                 ['strategy', '策略'],
                 ['preset', '预设'],
                 ['total_return', '总收益'],
+                ['alpha', 'Alpha'],
                 ['annualized_return', '年化'],
                 ['sharpe_ratio', '夏普'],
                 ['max_drawdown', '最大回撤'],
@@ -551,7 +621,7 @@ function BacktestList() {
           <tbody>
             {backtests?.length === 0 && (
               <tr>
-                <td colSpan={15} className="px-3 py-8 text-center text-gray-500">
+                <td colSpan={16} className="px-3 py-8 text-center text-gray-500">
                   暂无回测记录。点击「New Backtest」开始。
                 </td>
               </tr>
@@ -587,6 +657,17 @@ function BacktestList() {
                     }`}
                   >
                     {fmtPct01(bt.total_return)}
+                  </td>
+                  <td
+                    className={`px-3 py-2 whitespace-nowrap ${
+                      bt.alpha_vs_benchmark != null
+                        ? bt.alpha_vs_benchmark >= 0
+                          ? 'text-green-400'
+                          : 'text-red-400'
+                        : 'text-gray-500'
+                    }`}
+                  >
+                    {fmtPct01(bt.alpha_vs_benchmark)}
                   </td>
                   <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtPct01(bt.annualized_return)}</td>
                   <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtNum(bt.sharpe_ratio)}</td>
@@ -633,7 +714,7 @@ function BacktestDetail({ id }: { id: number }) {
       const next = await fetchBacktest(id)
       return mergeRunningBacktestProgress(qc.getQueryData<Backtest>(['backtest', id]), next)
     },
-    refetchInterval: (q) => (q.state.data?.status === 'running' ? 1500 : false),
+    refetchInterval: (q) => (q.state.data?.status === 'running' ? 2500 : false),
   })
 
   useEffect(() => {
@@ -649,6 +730,7 @@ function BacktestDetail({ id }: { id: number }) {
             phase: string | null
             message: string | null
             status?: string
+            progress_updated_at?: string | null
           }
         }
         if (msg.channel !== 'backtest_progress' || msg.data.backtest_id !== id) return
@@ -667,6 +749,7 @@ function BacktestDetail({ id }: { id: number }) {
                 ? ph
                 : prev.progress_phase,
             progress_message: msg.data.message ?? prev.progress_message,
+            progress_updated_at: msg.data.progress_updated_at ?? prev.progress_updated_at,
           }
         })
       } catch {
@@ -811,6 +894,12 @@ function BacktestDetail({ id }: { id: number }) {
         </p>
       )}
       {bt.status === 'running' && <BacktestProgressPanel bt={bt} />}
+      {bt.status === 'failed' && bt.error_message && (
+        <div className="rounded-xl border border-red-800/60 bg-red-950/30 px-4 py-3 text-sm text-red-200">
+          <p className="font-semibold text-red-300 mb-1">失败原因</p>
+          <p className="whitespace-pre-wrap break-words">{bt.error_message}</p>
+        </div>
+      )}
       {bt.status === 'completed' && (
         <>
           <div className="grid grid-cols-4 gap-4">
@@ -836,6 +925,26 @@ function BacktestDetail({ id }: { id: number }) {
             <MetricCard
               label="Annualized Return"
               value={bt.annualized_return != null ? `${(bt.annualized_return * 100).toFixed(2)}%` : '—'}
+            />
+            <MetricCard
+              label={`${String(bt.parameters?.benchmark_symbol ?? 'SPY')} buy-hold`}
+              value={
+                bt.benchmark_total_return != null
+                  ? `${(bt.benchmark_total_return * 100).toFixed(2)}%`
+                  : '—'
+              }
+              color="gray"
+            />
+            <MetricCard
+              label="Alpha vs benchmark"
+              value={
+                bt.alpha_vs_benchmark != null
+                  ? `${(bt.alpha_vs_benchmark * 100).toFixed(2)}%`
+                  : '—'
+              }
+              color={
+                bt.alpha_vs_benchmark != null && bt.alpha_vs_benchmark >= 0 ? 'green' : 'red'
+              }
             />
           </div>
           {equity && equity.length > 0 && (

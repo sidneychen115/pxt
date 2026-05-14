@@ -2,6 +2,11 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { fetchStrategies, updateStrategy } from '../api/strategies'
 import type { Strategy } from '../types'
+import {
+  STRATEGY_TIMEFRAME_ORDER,
+  describeLiveSchedule,
+  timeframeLabel,
+} from '../lib/strategyTimeframes'
 
 export default function Strategies() {
   const qc = useQueryClient()
@@ -30,9 +35,14 @@ export default function Strategies() {
                     <span key={sym} className="bg-gray-800 text-gray-300 text-xs px-2 py-0.5 rounded">{sym}</span>
                   ))}
                 </div>
-                <div className="text-xs text-gray-500 mt-1">
-                  Schedule: <code className="text-gray-300">{s.run_frequency}</code> |
-                  Timeframes: {s.timeframes.join(', ')}
+                <div className="text-xs text-gray-500 mt-1 space-y-0.5">
+                  <div>
+                    跟踪周期：
+                    {s.timeframes.length ? s.timeframes.map(tf => timeframeLabel(tf)).join('、') : '—'}
+                  </div>
+                  <div>
+                    {describeLiveSchedule(s.run_interval_minutes, s.run_anchor_timeframe, s.timeframes)}
+                  </div>
                 </div>
               </div>
               <div className="flex gap-2 items-center">
@@ -70,27 +80,62 @@ export default function Strategies() {
 
 function StrategyEditModal({ strategy, onClose }: { strategy: Strategy; onClose: () => void }) {
   const [symbols, setSymbols] = useState(strategy.symbols.join(', '))
-  const [frequency, setFrequency] = useState(strategy.run_frequency)
+  const [selectedTf, setSelectedTf] = useState<Set<string>>(() => new Set(strategy.timeframes))
   const mutation = useMutation({
-    mutationFn: () => updateStrategy(strategy.id, {
-      symbols: symbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean),
-      run_frequency: frequency,
-    }),
+    mutationFn: () => {
+      const ordered = STRATEGY_TIMEFRAME_ORDER.filter(tf => selectedTf.has(tf))
+      if (ordered.length === 0) {
+        throw new Error('请至少选择一个 K 线周期')
+      }
+      return updateStrategy(strategy.id, {
+        symbols: symbols.split(',').map(s => s.trim().toUpperCase()).filter(Boolean),
+        timeframes: ordered,
+      })
+    },
     onSuccess: onClose,
   })
+  const toggleTf = (tf: string) => {
+    setSelectedTf(prev => {
+      const next = new Set(prev)
+      if (next.has(tf)) next.delete(tf)
+      else next.add(tf)
+      return next
+    })
+  }
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div className="bg-gray-900 rounded-xl p-6 w-full max-w-md border border-gray-700 space-y-4">
-        <h2 className="text-lg font-bold">Edit: {strategy.name}</h2>
+        <h2 className="text-lg font-bold">编辑：{strategy.name}</h2>
         <div>
-          <label htmlFor="symbols-input" className="text-xs text-gray-400">Symbols (comma separated)</label>
+          <label htmlFor="symbols-input" className="text-xs text-gray-400">跟踪标的（英文逗号分隔）</label>
           <input id="symbols-input" value={symbols} onChange={e => setSymbols(e.target.value)}
             className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1" />
         </div>
         <div>
-          <label htmlFor="frequency-input" className="text-xs text-gray-400">Cron Schedule</label>
-          <input id="frequency-input" value={frequency} onChange={e => setFrequency(e.target.value)}
-            className="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm mt-1 font-mono" />
+          <span className="text-xs text-gray-400">K 线周期（可多选）</span>
+          <p className="text-[11px] text-gray-500 mt-1 mb-2">
+            启用后按所选周期中最短 K 线同步数据并执行策略，无需填写 Cron。
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {STRATEGY_TIMEFRAME_ORDER.map(tf => (
+              <label
+                key={tf}
+                className={`inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded border cursor-pointer ${
+                  selectedTf.has(tf)
+                    ? 'border-blue-500 bg-blue-950/50 text-blue-200'
+                    : 'border-gray-700 bg-gray-800/60 text-gray-400'
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  className="rounded border-gray-600"
+                  checked={selectedTf.has(tf)}
+                  onChange={() => toggleTf(tf)}
+                />
+                {timeframeLabel(tf)}
+              </label>
+            ))}
+          </div>
         </div>
         <div className="flex gap-2 justify-end">
           <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200">Cancel</button>
@@ -101,6 +146,11 @@ function StrategyEditModal({ strategy, onClose }: { strategy: Strategy; onClose:
             {mutation.isPending ? 'Saving...' : 'Save'}
           </button>
         </div>
+        {mutation.isError && (
+          <p className="text-red-400 text-xs">
+            {mutation.error instanceof Error ? mutation.error.message : '保存失败'}
+          </p>
+        )}
       </div>
     </div>
   )

@@ -4,6 +4,11 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.core.database import get_session
 from src.core.models import Strategy
+from src.scheduler.timeframe_interval import (
+    KNOWN_TIMEFRAMES,
+    anchor_timeframe,
+    min_interval_minutes,
+)
 
 router = APIRouter()
 
@@ -26,6 +31,8 @@ async def list_strategies(session: AsyncSession = Depends(get_session)):
             "id": s.id, "name": s.name, "description": s.description,
             "is_active": s.is_active, "symbols": s.symbols,
             "timeframes": s.timeframes, "run_frequency": s.run_frequency,
+            "run_interval_minutes": min_interval_minutes(list(s.timeframes or [])),
+            "run_anchor_timeframe": anchor_timeframe(list(s.timeframes or [])),
             "parameters": s.parameters, "max_symbols": s.max_symbols,
         }
         for s in strategies
@@ -38,10 +45,19 @@ async def get_strategy(strategy_id: str, session: AsyncSession = Depends(get_ses
     s = result.scalar_one_or_none()
     if not s:
         raise HTTPException(404, f"Strategy '{strategy_id}' not found.")
-    return {"id": s.id, "name": s.name, "description": s.description,
-            "is_active": s.is_active, "symbols": s.symbols,
-            "timeframes": s.timeframes, "run_frequency": s.run_frequency,
-            "parameters": s.parameters, "max_symbols": s.max_symbols}
+    return {
+        "id": s.id,
+        "name": s.name,
+        "description": s.description,
+        "is_active": s.is_active,
+        "symbols": s.symbols,
+        "timeframes": s.timeframes,
+        "run_frequency": s.run_frequency,
+        "run_interval_minutes": min_interval_minutes(list(s.timeframes or [])),
+        "run_anchor_timeframe": anchor_timeframe(list(s.timeframes or [])),
+        "parameters": s.parameters,
+        "max_symbols": s.max_symbols,
+    }
 
 
 @router.put("/{strategy_id}")
@@ -54,6 +70,16 @@ async def update_strategy(
     updates = body.model_dump(exclude_unset=True)
     if not updates:
         raise HTTPException(400, "No fields to update.")
+    if "timeframes" in updates and updates["timeframes"] is not None:
+        tfs = updates["timeframes"]
+        if not tfs:
+            raise HTTPException(400, "timeframes must include at least one period.")
+        unknown = [tf for tf in tfs if tf not in KNOWN_TIMEFRAMES]
+        if unknown:
+            raise HTTPException(400, f"Unknown timeframe(s): {', '.join(unknown)}")
+        # Keep run_frequency column in sync for logs / legacy readers (not used for scheduling).
+        m = min_interval_minutes(list(tfs))
+        updates["run_frequency"] = f"{m}m"
     if "symbols" in updates:
         max_sym = updates.get("max_symbols") or 50
         if len(updates["symbols"]) > max_sym:

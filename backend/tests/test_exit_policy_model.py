@@ -21,7 +21,8 @@ def test_all_none_is_valid():
     policy = ExitPolicy()
     assert policy.stop_loss_pct is None
     assert policy.trailing_stop_pct is None
-    assert policy.price_check_mode == "close"
+    assert policy.entry_price_check_mode == "close"
+    assert policy.exit_price_check_mode == "ohlc"
     assert policy.disable_sell_signal is False
 
 
@@ -35,12 +36,26 @@ def test_valid_combined_policy():
         stop_loss_pct=0.05,
         take_profit_pct=0.15,
         trailing_stop_pct=0.03,
-        price_check_mode="ohlc",
+        exit_price_check_mode="ohlc",
     )
     assert policy.stop_loss_pct == 0.05
     assert policy.take_profit_pct == 0.15
     assert policy.trailing_stop_pct == 0.03
-    assert policy.price_check_mode == "ohlc"
+    assert policy.exit_price_check_mode == "ohlc"
+
+
+def test_legacy_price_check_mode_maps_to_exit_only():
+    policy = ExitPolicy(price_check_mode="close")
+    assert policy.exit_price_check_mode == "close"
+    assert policy.entry_price_check_mode == "close"
+
+
+def test_explicit_exit_wins_over_legacy():
+    policy = ExitPolicy(
+        price_check_mode="close",
+        exit_price_check_mode="ohlc",
+    )
+    assert policy.exit_price_check_mode == "ohlc"
 
 
 def test_trailing_with_activation_valid():

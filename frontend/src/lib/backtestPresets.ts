@@ -17,7 +17,8 @@ export interface BacktestPreset {
   id: string
   name: string
   createdAt: string
-  strategy_id: string
+  /** 旧数据可能绑定策略；新预设为 null，加载后需在回测页自选策略 */
+  strategy_id: string | null
   start_date: string
   end_date: string
   /** Comma-separated symbols, same as form input */
@@ -39,7 +40,12 @@ export interface BacktestFormSnapshot {
 
 function mergeExitPolicy(raw: unknown): ExitFormState {
   if (!raw || typeof raw !== 'object') return { ...EMPTY_EXIT_FORM }
-  return { ...EMPTY_EXIT_FORM, ...(raw as Partial<ExitFormState>) }
+  const o = raw as Record<string, unknown>
+  const merged = { ...EMPTY_EXIT_FORM, ...(raw as Partial<ExitFormState>) }
+  if (!('exit_price_check_mode' in o) && typeof o.price_check_mode === 'string') {
+    merged.exit_price_check_mode = o.price_check_mode === 'ohlc' ? 'ohlc' : 'close'
+  }
+  return merged
 }
 
 /** Map API row to UI model (parameters kept as JSON string for forms). */
@@ -48,7 +54,7 @@ export function dtoToPreset(d: BacktestPresetDto): BacktestPreset {
     id: d.id,
     name: d.name,
     createdAt: d.created_at,
-    strategy_id: d.strategy_id,
+    strategy_id: d.strategy_id ?? null,
     start_date: d.start_date,
     end_date: d.end_date,
     symbols: d.symbols,
@@ -60,7 +66,7 @@ export function dtoToPreset(d: BacktestPresetDto): BacktestPreset {
 
 export function applyPreset(p: BacktestPreset): BacktestFormSnapshot {
   return {
-    strategy_id: p.strategy_id,
+    strategy_id: '',
     start_date: p.start_date,
     end_date: p.end_date,
     symbols: p.symbols,
@@ -139,7 +145,7 @@ export function findMatchingPresetName(bt: Backtest, presets: BacktestPreset[]):
   const exitCmp = jsonComparable(snap.exitPolicy)
 
   for (const p of presets) {
-    if (p.strategy_id !== snap.strategy_id) continue
+    if (p.strategy_id != null && p.strategy_id !== '' && p.strategy_id !== snap.strategy_id) continue
     if (p.start_date !== snap.start_date) continue
     if (p.end_date !== snap.end_date) continue
     if (normalizeSymbolCsv(p.symbols) !== symSnap) continue
@@ -165,7 +171,7 @@ export function presetBodyFromSnapshot(
   const parameters = parseParametersJson(snap.parametersJson)
   return {
     name: name.trim().slice(0, 80),
-    strategy_id: snap.strategy_id,
+    strategy_id: null,
     start_date: snap.start_date,
     end_date: snap.end_date,
     symbols: snap.symbols,
