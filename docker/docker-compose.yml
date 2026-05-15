@@ -39,6 +39,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.frontend
+    # Maps host port 3000 → container :80 for all interfaces (default). Other devices on the
+    # same Wi‑Fi: http://<this machine’s LAN IPv4>:3000 — ensure the host OS firewall allows TCP 3000.
     ports:
       - "3000:80"
     depends_on:

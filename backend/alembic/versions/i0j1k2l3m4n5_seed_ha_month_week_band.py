@@ -24,7 +24,7 @@ def upgrade() -> None:
             false,
             ARRAY['SPY'],
             ARRAY['1d'],
-            '0 16 * * 1-5',
+            '0 14 * * mon-fri',
             '{"timeframe": "1d", "band_pct": 0.0, "band_abs": 0.0, "backtest_fill_mode": "same_close"}'::jsonb,
             50,
             now()

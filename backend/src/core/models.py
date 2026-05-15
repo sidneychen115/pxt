@@ -65,6 +65,60 @@ class OhlcvBar(Base):
     )
 
 
+class HaMonthOpenCache(Base):
+    """Cached monthly Heikin-Ashi open for a calendar month (stable within the month)."""
+
+    __tablename__ = "ha_month_open_cache"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    instrument_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("instruments.id", ondelete="CASCADE"), nullable=False
+    )
+    calendar_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    calendar_month: Mapped[int] = mapped_column(Integer, nullable=False)
+    ha_open: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id",
+            "calendar_year",
+            "calendar_month",
+            name="uq_ha_month_open_instrument_ym",
+        ),
+        Index("idx_ha_month_open_lookup", "instrument_id", "calendar_year", "calendar_month"),
+    )
+
+
+class HaMonthAnchorCache(Base):
+    """HA open/close of the last completed calendar month — seeds current month HA open."""
+
+    __tablename__ = "ha_month_anchor_cache"
+
+    instrument_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("instruments.id", ondelete="CASCADE"), primary_key=True
+    )
+    calendar_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    calendar_month: Mapped[int] = mapped_column(Integer, nullable=False)
+    ha_open: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    ha_close: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, nullable=False)
+
+
+class HaWeekAnchorCache(Base):
+    """HA open/close of the last completed week — seeds incremental in-progress week HA."""
+
+    __tablename__ = "ha_week_anchor_cache"
+
+    instrument_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("instruments.id", ondelete="CASCADE"), primary_key=True
+    )
+    week_end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    ha_open: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    ha_close: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, nullable=False)
+
+
 class OptionChainSnapshot(Base):
     __tablename__ = "option_chain_snapshots"
 

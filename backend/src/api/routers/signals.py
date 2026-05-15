@@ -1,10 +1,24 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select, desc
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.api.routers.signal_serialize import signal_detail_to_dict, signal_to_dict
 from src.core.database import get_session
-from src.core.models import TradeSignalRecord
+from src.core.models import Instrument, Option, TradeSignalRecord
 
 router = APIRouter()
+
+
+def _signals_select():
+    return (
+        select(
+            TradeSignalRecord,
+            Instrument.symbol.label("stock_symbol"),
+            Option.symbol.label("option_symbol"),
+        )
+        .outerjoin(Instrument, TradeSignalRecord.stock_id == Instrument.id)
+        .outerjoin(Option, TradeSignalRecord.option_id == Option.id)
+    )
 
 
 @router.get("/")
@@ -15,47 +29,27 @@ async def list_signals(
     offset: int = 0,
     session: AsyncSession = Depends(get_session),
 ):
-    query = select(TradeSignalRecord).order_by(desc(TradeSignalRecord.created_at))
+    query = _signals_select().order_by(desc(TradeSignalRecord.created_at))
     if strategy_id:
         query = query.where(TradeSignalRecord.strategy_id == strategy_id)
     if status:
         query = query.where(TradeSignalRecord.status == status)
     query = query.offset(offset).limit(limit)
     result = await session.execute(query)
-    signals = result.scalars().all()
     return [
-        {
-            "id": s.id, "strategy_id": s.strategy_id,
-            "stock_id": s.stock_id, "option_id": s.option_id,
-            "signal_time": s.signal_time, "direction": s.direction,
-            "quantity": float(s.quantity) if s.quantity else None,
-            "order_type": s.order_type,
-            "limit_price": float(s.limit_price) if s.limit_price else None,
-            "confidence": float(s.confidence) if s.confidence else None,
-            "reasoning": s.reasoning, "status": s.status,
-            "created_at": s.created_at,
-        }
-        for s in signals
+        signal_to_dict(row[0], stock_symbol=row.stock_symbol, option_symbol=row.option_symbol)
+        for row in result.all()
     ]
 
 
 @router.get("/{signal_id}")
 async def get_signal(signal_id: int, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
-        select(TradeSignalRecord).where(TradeSignalRecord.id == signal_id)
+        _signals_select().where(TradeSignalRecord.id == signal_id)
     )
-    s = result.scalar_one_or_none()
-    if not s:
+    row = result.one_or_none()
+    if not row:
         raise HTTPException(404, "Signal not found.")
-    return {
-        "id": s.id, "strategy_id": s.strategy_id,
-        "stock_id": s.stock_id, "option_id": s.option_id,
-        "signal_time": s.signal_time, "direction": s.direction,
-        "quantity": float(s.quantity) if s.quantity else None,
-        "order_type": s.order_type,
-        "limit_price": float(s.limit_price) if s.limit_price else None,
-        "stop_price": float(s.stop_price) if s.stop_price else None,
-        "confidence": float(s.confidence) if s.confidence else None,
-        "reasoning": s.reasoning, "status": s.status,
-        "metadata": s.metadata_, "created_at": s.created_at,
-    }
+    return signal_detail_to_dict(
+        row[0], stock_symbol=row.stock_symbol, option_symbol=row.option_symbol
+    )

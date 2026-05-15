@@ -1,5 +1,9 @@
+from __future__ import annotations
+
 import logging
 from datetime import date, datetime, timedelta, timezone
+from typing import TYPE_CHECKING
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, desc, update
@@ -9,6 +13,9 @@ from src.core.database import get_session, async_session_factory
 from src.core.models import Backtest, BacktestTrade, BacktestEquityCurve, Strategy
 from src.api.websocket import ws_manager
 from src.backtesting.exit_policy import ExitPolicy
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -139,6 +146,132 @@ async def get_equity_curve(
     ]
 
 
+_DAILY_LIKE_TIMEFRAMES = frozenset({"1d", "1wk", "1mo"})
+
+
+def _encode_ohlc_bar_time(timeframe: str, ts: datetime) -> str | int:
+    """Chart time: business-day string for daily+ aggregates, UTC unix seconds for intraday."""
+    if timeframe in _DAILY_LIKE_TIMEFRAMES:
+        t = ts
+        if getattr(ts, "tzinfo", None):
+            t = ts.astimezone(timezone.utc)
+        return t.strftime("%Y-%m-%d")
+    t = ts if getattr(ts, "tzinfo", None) else ts.replace(tzinfo=timezone.utc)
+    if getattr(t, "tzinfo", None) is None:
+        t = t.replace(tzinfo=timezone.utc)
+    else:
+        t = t.astimezone(timezone.utc)
+    return int(t.timestamp())
+
+
+def _trade_event_bar_index(index: pd.DatetimeIndex, event_time: datetime) -> int | None:
+    import pandas as pd
+
+    if index.empty or event_time is None:
+        return None
+    t = pd.Timestamp(event_time)
+    if t.tzinfo is None:
+        t = t.tz_localize("UTC")
+    else:
+        t = t.tz_convert("UTC")
+    pos = int(index.get_indexer([t], method="nearest")[0])
+    if pos < 0:
+        return None
+    return pos
+
+
+def _subsample_ohlc_row_indices(n: int, max_points: int, preserve: set[int]) -> list[int]:
+    """Evenly subsample [0..n-1], always including preserve (trade bars)."""
+    preserve = {p for p in preserve if 0 <= p < n}
+    if n <= max_points:
+        return list(range(n))
+    if not preserve:
+        return sorted({int(round(i * (n - 1) / (max_points - 1))) for i in range(max_points)})
+    kept = set(preserve)
+    if len(kept) > max_points:
+        tp = sorted(kept)
+        return [tp[int(round(j * (len(tp) - 1) / (max_points - 1)))] for j in range(max_points)]
+    remaining = max_points - len(kept)
+    pool = [i for i in range(n) if i not in kept]
+    if not pool:
+        return sorted(kept)
+    if remaining == 1:
+        picks = {pool[len(pool) // 2]}
+    else:
+        picks = {pool[int(round(j * (len(pool) - 1) / (remaining - 1)))] for j in range(remaining)}
+    return sorted(kept | picks)
+
+
+@router.get("/{backtest_id}/ohlc")
+async def get_backtest_ohlc(
+    backtest_id: int,
+    symbol: str = Query(..., min_length=1),
+    max_points: int = Query(4000, ge=200, le=50_000),
+    session: AsyncSession = Depends(get_session),
+):
+    """OHLC bars for one symbol over the backtest window (same fetch path as the engine)."""
+    result = await session.execute(select(Backtest).where(Backtest.id == backtest_id))
+    bt = result.scalar_one_or_none()
+    if not bt:
+        raise HTTPException(404, "Backtest not found.")
+    if symbol not in bt.symbols:
+        raise HTTPException(400, "symbol is not part of this backtest.")
+    if bt.status != "completed":
+        raise HTTPException(409, "OHLC is only available for completed backtests.")
+
+    timeframe = await _resolve_timeframe_from_params(bt.strategy_id, bt.parameters or {})
+    start = datetime(bt.start_date.year, bt.start_date.month, bt.start_date.day, tzinfo=timezone.utc)
+    end = datetime(bt.end_date.year, bt.end_date.month, bt.end_date.day, tzinfo=timezone.utc) + timedelta(days=1)
+    if timeframe in _INTRADAY_TIMEFRAMES:
+        days_span = (end - start).days
+        if days_span > 730:
+            raise HTTPException(
+                400,
+                f"yfinance intraday data ({timeframe}) is limited to about 730 days; this range is {days_span} days.",
+            )
+
+    trades_result = await session.execute(
+        select(BacktestTrade).where(
+            BacktestTrade.backtest_id == backtest_id,
+            BacktestTrade.symbol == symbol,
+        )
+    )
+    symbol_trades = trades_result.scalars().all()
+
+    df = await _fetch_with_cache(symbol, timeframe, start, end)
+    if df.empty:
+        return {"symbol": symbol, "timeframe": timeframe, "bars": []}
+
+    preserve: set[int] = set()
+    idx = df.index
+    for t in symbol_trades:
+        ei = _trade_event_bar_index(idx, t.entry_time)
+        if ei is not None:
+            preserve.add(ei)
+        if t.exit_time is not None:
+            xi = _trade_event_bar_index(idx, t.exit_time)
+            if xi is not None:
+                preserve.add(xi)
+
+    row_ix = _subsample_ohlc_row_indices(len(df), max_points, preserve)
+    sub = df.iloc[row_ix]
+    bars = []
+    for ts, row in sub.iterrows():
+        tnorm = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+        if getattr(tnorm, "tzinfo", None) is None:
+            tnorm = tnorm.replace(tzinfo=timezone.utc)
+        bars.append(
+            {
+                "time": _encode_ohlc_bar_time(timeframe, tnorm),
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+            }
+        )
+    return {"symbol": symbol, "timeframe": timeframe, "bars": bars}
+
+
 def _backtest_summary(bt: Backtest, *, include_llm: bool = True) -> dict:
     return {
         "id": bt.id, "strategy_id": bt.strategy_id,
@@ -167,17 +300,22 @@ def _backtest_summary(bt: Backtest, *, include_llm: bool = True) -> dict:
     }
 
 
-async def _resolve_backtest_timeframe(req: BacktestRequest) -> str:
+async def _resolve_timeframe_from_params(strategy_id: str, parameters: dict | None) -> str:
     """Use parameters['timeframe'] if set; otherwise first timeframe from Strategy row; else 1d."""
     default_tf = "1d"
+    params = parameters or {}
     async with async_session_factory() as session:
-        row = await session.get(Strategy, req.strategy_id)
+        row = await session.get(Strategy, strategy_id)
     if row is not None and row.timeframes:
         default_tf = row.timeframes[0] or default_tf
-    override = req.parameters.get("timeframe")
+    override = params.get("timeframe")
     if override not in (None, ""):
         return str(override)
     return default_tf
+
+
+async def _resolve_backtest_timeframe(req: BacktestRequest) -> str:
+    return await _resolve_timeframe_from_params(req.strategy_id, req.parameters)
 
 
 async def _set_backtest_progress(backtest_id: int, phase: str, message: str | None = None) -> None:
@@ -215,7 +353,7 @@ def _engine_bar_progress(backtest_id: int):
     return on_bar
 
 
-async def _fetch_with_cache(sym: str, timeframe: str, start: datetime, end: datetime) -> "pd.DataFrame":
+async def _fetch_with_cache(sym: str, timeframe: str, start: datetime, end: datetime) -> pd.DataFrame:
     """Return bars for sym in [start, end], using DB cache and filling gaps from yfinance."""
     import pandas as pd
     from src.data.providers.yfinance_provider import YFinanceProvider

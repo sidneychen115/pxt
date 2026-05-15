@@ -5,19 +5,24 @@ export interface Strategy {
   is_active: boolean
   symbols: string[]
   timeframes: string[]
-  /** Legacy column; scheduling uses run_interval_minutes from timeframes. */
+  /** Interval like `1440m` or 5-field cron (e.g. `0 14 * * mon-fri`, America/Chicago). */
   run_frequency: string
-  /** Minutes between live runs; equals the smallest selected timeframe. */
+  schedule_mode?: 'interval' | 'cron'
+  cron_schedule?: { hour: number; minute: number; days: string } | null
+  /** Minutes between live runs when schedule_mode is interval. */
   run_interval_minutes?: number
-  /** Timeframe that sets run_interval_minutes (shortest bar). */
   run_anchor_timeframe?: string
   parameters: Record<string, unknown>
+  /** Registry class defaults for this strategy id (read-only reference for the editor). */
+  default_parameters?: Record<string, unknown>
   max_symbols: number
 }
 
 export interface Signal {
   id: number
   strategy_id: string
+  /** Ticker from instruments/options join; use for manual trading. */
+  symbol: string | null
   stock_id: number | null
   option_id: number | null
   signal_time: string
@@ -110,6 +115,21 @@ export interface EquityPoint {
   equity: number
   cash: number
   drawdown: number | null
+}
+
+/** Server: YYYY-MM-DD for daily+ TFs, unix seconds (UTC) for intraday. */
+export interface OhlcBar {
+  time: string | number
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+export interface BacktestOhlcResponse {
+  symbol: string
+  timeframe: string
+  bars: OhlcBar[]
 }
 
 export interface SystemEvent {

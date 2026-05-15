@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     strategy_run_timeout: int = 300
     data_batch_size: int = 20
     data_batch_delay: float = 0.5
+    # Months of daily history for HA month-anchor cold-start.
+    ha_lookback_months: int = 24
+    # Weeks of daily history for HA week-anchor cold-start (Mon–Fri weeks).
+    ha_lookback_weeks: int = 24
 
 
 settings = Settings()

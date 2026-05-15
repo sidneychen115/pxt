@@ -3,12 +3,13 @@ import { useState, useEffect, useMemo } from 'react'
 import { useParams, useNavigate, useLocation, Link } from 'react-router-dom'
 import {
   fetchBacktests, fetchBacktest, triggerBacktest,
-  fetchBacktestTrades, fetchEquityCurve,
+  fetchBacktestTrades, fetchEquityCurve, fetchBacktestOhlc,
 } from '../api/backtests'
 import { createBacktestPreset, fetchBacktestPresets } from '../api/backtestPresetsApi'
 import { fetchStrategies } from '../api/strategies'
 import MetricCard from '../components/MetricCard'
 import EquityChart from '../components/EquityChart'
+import BacktestCandlestickChart from '../components/BacktestCandlestickChart'
 import SignalBadge from '../components/SignalBadge'
 import BacktestConfigForm from '../components/BacktestConfigForm'
 import type { Backtest, BacktestProgressPhase, BacktestTrade } from '../types'
@@ -708,6 +709,8 @@ function BacktestDetail({ id }: { id: number }) {
   const navigate = useNavigate()
   const qc = useQueryClient()
   const [tradeSortRules, setTradeSortRules] = useState<TradeSortRule[]>([])
+  const [chartSymbol, setChartSymbol] = useState<string | null>(null)
+  const [chartFocusTradeId, setChartFocusTradeId] = useState<number | null>(null)
   const { data: bt, isLoading } = useQuery({
     queryKey: ['backtest', id],
     queryFn: async () => {
@@ -737,6 +740,9 @@ function BacktestDetail({ id }: { id: number }) {
         if (msg.data.status === 'completed' || msg.data.status === 'failed') {
           qc.invalidateQueries({ queryKey: ['backtest', id] })
           qc.invalidateQueries({ queryKey: ['backtests'] })
+          qc.invalidateQueries({ queryKey: ['bt-ohlc', id] })
+          qc.invalidateQueries({ queryKey: ['bt-trades', id] })
+          qc.invalidateQueries({ queryKey: ['bt-equity', id] })
           return
         }
         qc.setQueryData(['backtest', id], (prev: Backtest | undefined) => {
@@ -761,6 +767,17 @@ function BacktestDetail({ id }: { id: number }) {
     }
   }, [id, bt?.status, qc])
 
+  useEffect(() => {
+    if (!bt?.symbols?.length) return
+    setChartSymbol(prev => (prev && bt.symbols.includes(prev) ? prev : bt.symbols[0]))
+  }, [bt?.id, bt?.symbols])
+
+  useEffect(() => {
+    setChartFocusTradeId(null)
+  }, [bt?.id])
+
+  const chartSym =
+    chartSymbol && bt?.symbols?.includes(chartSymbol) ? chartSymbol : (bt?.symbols?.[0] ?? '')
 
   const { data: trades } = useQuery({
     queryKey: ['bt-trades', id],
@@ -839,6 +856,17 @@ function BacktestDetail({ id }: { id: number }) {
     queryKey: ['bt-equity', id],
     queryFn: () => fetchEquityCurve(id),
     enabled: bt?.status === 'completed',
+  })
+
+  const {
+    data: ohlc,
+    isPending: ohlcPending,
+    isError: ohlcError,
+    error: ohlcErrorObj,
+  } = useQuery({
+    queryKey: ['bt-ohlc', id, chartSym],
+    queryFn: () => fetchBacktestOhlc(id, { symbol: chartSym }),
+    enabled: bt?.status === 'completed' && chartSym.length > 0,
   })
 
   const rerunMutation = useMutation({
@@ -959,12 +987,63 @@ function BacktestDetail({ id }: { id: number }) {
               <pre className="text-sm text-gray-300 whitespace-pre-wrap font-sans">{bt.llm_evaluation}</pre>
             </div>
           )}
+          {chartSym && (
+            <div
+              id="backtest-ohlc-panel"
+              className="bg-gray-900 rounded-xl p-4 border border-gray-800 scroll-mt-4 min-h-[480px]"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                <h2 className="text-sm font-semibold text-gray-400">行情与买卖点</h2>
+                {bt.symbols.length > 1 && (
+                  <label className="text-xs text-gray-500 flex items-center gap-2">
+                    <span>标的</span>
+                    <select
+                      value={chartSym}
+                      onChange={e => {
+                        setChartSymbol(e.target.value)
+                        setChartFocusTradeId(null)
+                      }}
+                      className="bg-gray-950 border border-gray-700 rounded px-2 py-1 text-gray-200"
+                    >
+                      {bt.symbols.map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
+              {ohlcPending && <div className="text-gray-400 text-sm">加载 K 线…</div>}
+              {ohlcError && (
+                <p className="text-red-400 text-sm">
+                  无法加载 K 线：
+                  {ohlcErrorObj instanceof Error ? ohlcErrorObj.message : '请求失败'}
+                </p>
+              )}
+              {ohlc && ohlc.bars.length === 0 && !ohlcPending && !ohlcError && (
+                <p className="text-gray-500 text-sm">该窗口无可用 K 线数据。</p>
+              )}
+              {ohlc && ohlc.bars.length > 0 && trades && (
+                <div className="w-full min-h-[560px]">
+                  <BacktestCandlestickChart
+                    ohlc={ohlc}
+                    trades={trades.filter(t => t.symbol === chartSym)}
+                    focusTradeId={chartFocusTradeId}
+                  />
+                </div>
+              )}
+              {ohlc && ohlc.bars.length > 0 && (
+                <p className="text-xs text-gray-500 mt-2">周期：{ohlc.timeframe}</p>
+              )}
+            </div>
+          )}
           <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
             <div className="px-4 py-3 border-b border-gray-800">
               <h2 className="text-sm font-semibold text-gray-300">成交明细</h2>
               <p className="text-xs text-gray-500 mt-1">
                 表头可排序：单击单列（降序→升序→取消）；Shift+单击追加多列排序。
                 {tradeSortRules.length > 1 && ' 多列时仅当左侧列并列时才用下一列。'}
+                {' '}
+                单击某一行可跳转到上方 K 线并缩放到该笔买卖点附近。
               </p>
             </div>
             <div className="overflow-x-auto">
@@ -1005,7 +1084,38 @@ function BacktestDetail({ id }: { id: number }) {
               </thead>
               <tbody>
                 {sortedTradeRows.map(({ t }) => (
-                  <tr key={t.id} className="border-b border-gray-800/40 hover:bg-gray-800/30">
+                  <tr
+                    key={t.id}
+                    role="button"
+                    tabIndex={0}
+                    title="跳转到 K 线与买卖点"
+                    onClick={() => {
+                      setChartSymbol(t.symbol)
+                      setChartFocusTradeId(t.id)
+                      requestAnimationFrame(() => {
+                        document.getElementById('backtest-ohlc-panel')?.scrollIntoView({
+                          behavior: 'smooth',
+                          block: 'start',
+                        })
+                      })
+                    }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault()
+                        setChartSymbol(t.symbol)
+                        setChartFocusTradeId(t.id)
+                        requestAnimationFrame(() => {
+                          document.getElementById('backtest-ohlc-panel')?.scrollIntoView({
+                            behavior: 'smooth',
+                            block: 'start',
+                          })
+                        })
+                      }
+                    }}
+                    className={`border-b border-gray-800/40 hover:bg-gray-800/30 cursor-pointer ${
+                      chartFocusTradeId === t.id ? 'bg-slate-800/50 ring-1 ring-inset ring-blue-500/40' : ''
+                    }`}
+                  >
                     <td className="px-4 py-2 font-mono font-semibold text-gray-200">{t.symbol}</td>
                     <td className="px-4 py-2"><SignalBadge direction={t.direction} /></td>
                     <td className="px-4 py-2 text-right text-gray-300">{t.quantity}</td>

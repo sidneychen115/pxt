@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react'
 import { fetchHealth } from '../api/system'
 import { fetchStrategies } from '../api/strategies'
 import { fetchSignals } from '../api/signals'
+import type { Signal } from '../types'
 import { useWebSocket } from '../hooks/useWebSocket'
 import MetricCard from '../components/MetricCard'
 import SignalBadge from '../components/SignalBadge'
@@ -35,14 +36,22 @@ export default function Dashboard() {
       <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
         <h2 className="text-sm font-semibold text-gray-400 mb-3">Recent Signals</h2>
         {signals?.length === 0 && <p className="text-gray-500 text-sm">No signals yet.</p>}
-        <div className="space-y-2">
-          {signals?.map(s => (
-            <div key={s.id} className="flex items-center gap-3 text-sm">
-              <SignalBadge direction={s.direction} />
-              <span className="text-gray-200 font-mono">{s.strategy_id}</span>
-              <span className="text-gray-400 text-xs ml-auto">
-                {new Date(s.created_at).toLocaleTimeString()}
-              </span>
+        <div className="space-y-3">
+          {signals?.map((s: Signal) => (
+            <div key={s.id} className="border-b border-gray-800/50 pb-2 last:border-0 last:pb-0">
+              <div className="flex items-center gap-2 text-sm flex-wrap">
+                <SignalBadge direction={s.direction} />
+                <span className="font-mono font-semibold text-gray-100">{s.symbol ?? '—'}</span>
+                <span className="text-gray-500 font-mono text-xs">{s.strategy_id}</span>
+                <span className="text-gray-500 text-xs ml-auto">
+                  {new Date(s.created_at).toLocaleString()}
+                </span>
+              </div>
+              {s.reasoning && (
+                <p className="text-xs text-gray-400 mt-1 leading-relaxed line-clamp-2" title={s.reasoning}>
+                  {s.reasoning}
+                </p>
+              )}
             </div>
           ))}
         </div>

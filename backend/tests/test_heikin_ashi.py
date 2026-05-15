@@ -1,7 +1,12 @@
 import pytest
 import pandas as pd
 
-from src.strategies.heikin_ashi import heikin_ashi, resample_to_monthly, resample_to_weekly_friday
+from src.strategies.heikin_ashi import (
+    heikin_ashi,
+    resample_to_monthly,
+    resample_to_weekly_friday,
+    resample_to_weekly_mon_fri,
+)
 
 
 def test_heikin_ashi_first_bar():
@@ -34,6 +39,25 @@ def test_resample_monthly_partial():
     m = resample_to_monthly(df)
     assert len(m) >= 1
     assert m["close"].iloc[-1] == df["close"].iloc[-1]
+
+
+def test_resample_weekly_mon_fri_alias():
+    idx = pd.date_range("2024-01-02", periods=10, freq="B", tz="UTC")
+    df = pd.DataFrame(
+        {
+            "open": [1.0] * 10,
+            "high": [2.0] * 10,
+            "low": [0.5] * 10,
+            "close": [1.5] * 10,
+            "volume": [100] * 10,
+        },
+        index=idx,
+    )
+    assert not resample_to_weekly_mon_fri(df).empty
+    pd.testing.assert_frame_equal(
+        resample_to_weekly_friday(df),
+        resample_to_weekly_mon_fri(df),
+    )
 
 
 def test_resample_weekly_friday():

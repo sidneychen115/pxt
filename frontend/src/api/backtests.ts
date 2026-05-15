@@ -1,5 +1,5 @@
 import client from './client'
-import type { Backtest, BacktestTrade, EquityPoint, ExitPolicy } from '../types'
+import type { Backtest, BacktestOhlcResponse, BacktestTrade, EquityPoint, ExitPolicy } from '../types'
 
 export const fetchBacktests = (strategy_id?: string) =>
   client.get<Backtest[]>('/backtests/', { params: { strategy_id } }).then(r => r.data)
@@ -23,3 +23,11 @@ export const fetchBacktestTrades = (id: number, sort_by = 'entry_time', order = 
 
 export const fetchEquityCurve = (id: number) =>
   client.get<EquityPoint[]>(`/backtests/${id}/equity`).then(r => r.data)
+
+export const fetchBacktestOhlc = (id: number, params: { symbol: string; max_points?: number }) =>
+  client
+    .get<BacktestOhlcResponse>(`/backtests/${id}/ohlc`, {
+      params: { symbol: params.symbol, max_points: params.max_points },
+      timeout: 600_000,
+    })
+    .then(r => r.data)

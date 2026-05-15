@@ -4,14 +4,15 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select
 from sqlalchemy.engine.url import make_url
 from src.core.config import settings
 from src.core.database import async_session_factory
 from src.core.models import Strategy, SystemEvent
+from src.core.strategy_run_logger import StrategyRunLogger
 from src.strategies.live_context import LiveDataContext
 from src.strategies.registry import REGISTRY, discover_strategies
+from src.scheduler.run_schedule import build_trigger, schedule_mode
 from src.scheduler.timeframe_interval import anchor_timeframe, min_interval_minutes
 from src.data.collector import DataCollector
 from src.signals.processor import SignalProcessor
@@ -87,19 +88,21 @@ class StrategyScheduler:
         if config.id not in REGISTRY:
             logger.warning("Strategy '%s' in DB but not in registry — skipping.", config.id)
             return
-        interval_m = min_interval_minutes(list(config.timeframes or []))
+        trigger = build_trigger(config.run_frequency, TZ)
+        mode = schedule_mode(config.run_frequency)
         anchor_tf = anchor_timeframe(list(config.timeframes or []))
         self._scheduler.add_job(
             self._run_strategy,
-            IntervalTrigger(minutes=interval_m, timezone=TZ),
+            trigger,
             kwargs={"strategy_id": config.id},
             id=f"strategy_{config.id}",
             replace_existing=True,
         )
         logger.info(
-            "Registered strategy job: %s every %s min (anchor TF %s)",
+            "Registered strategy job: %s mode=%s frequency=%s (anchor TF %s)",
             config.id,
-            interval_m,
+            mode,
+            config.run_frequency,
             anchor_tf,
         )
 
@@ -139,34 +142,76 @@ class StrategyScheduler:
             if not config:
                 return
 
+            run_log = StrategyRunLogger(session, strategy_id)
+            mode = schedule_mode(config.run_frequency)
             strategy = REGISTRY[strategy_id]()
-            ctx = LiveDataContext(session)
             run_params = dict(config.parameters or {})
             if config.timeframes:
                 run_params.setdefault("timeframe", config.timeframes[0])
+            use_snapshot = mode == "cron" or bool(
+                run_params.get("snapshot_close_at_run", False)
+            )
+            await run_log.start(
+                f"Strategy {strategy_id} started",
+                symbols=list(config.symbols or []),
+                timeframes=list(config.timeframes or []),
+                schedule_mode=mode,
+                run_frequency=config.run_frequency,
+                snapshot_close=use_snapshot,
+            )
+
+            quote_prices: dict[str, float] = {}
             try:
+                if use_snapshot:
+                    # Do not sync before cron HA runs: yfinance may persist an intraday
+                    # daily bar. Snapshot close exists only in memory (see LiveDataContext).
+                    if strategy_id != "ha_month_week_band":
+                        for sym in config.symbols:
+                            for tf in config.timeframes or ["1d"]:
+                                await run_log.step(f"Syncing OHLCV {sym} {tf}…")
+                                await self._collector.sync_symbol_timeframe(sym, tf)
+                    if strategy_id == "ha_month_week_band":
+                        sym_count = len(config.symbols or [])
+                        await run_log.step(
+                            f"Prefetching mark prices for {sym_count} symbol(s)…"
+                        )
+                        from src.strategies.quote_batch import prefetch_mark_prices
+
+                        quote_prices = await prefetch_mark_prices(config.symbols)
+                        await run_log.step(
+                            f"Mark prices ready: {len(quote_prices)}/{sym_count} symbol(s)",
+                            quotes_ok=len(quote_prices),
+                            quotes_total=sym_count,
+                        )
+
+                ctx = LiveDataContext(
+                    session,
+                    snapshot_close=use_snapshot,
+                    quote_prices=quote_prices,
+                    run_logger=run_log,
+                )
+                await run_log.step("Running generate_signals…")
                 async with asyncio.timeout(settings.strategy_run_timeout):
                     signals = await strategy.generate_signals(
                         config.symbols, run_params, ctx, portfolio=None
                     )
                 await self._save_signals(session, config, signals)
-                await self._log_event(
-                    "strategy_run", "info",
-                    f"Strategy {strategy_id} generated {len(signals)} signal(s).",
-                    session=session,
+                for sig in signals:
+                    await run_log.step(
+                        f"Signal {sig.symbol} {sig.direction.upper()}: {sig.reasoning}",
+                        symbol=sig.symbol,
+                        direction=sig.direction,
+                    )
+                await run_log.complete(
+                    f"Strategy {strategy_id} finished — {len(signals)} signal(s)",
+                    signal_count=len(signals),
                 )
             except TimeoutError:
-                await self._log_event(
-                    "strategy_run", "error",
-                    f"Strategy {strategy_id} timed out after {settings.strategy_run_timeout}s.",
-                    session=session,
+                await run_log.fail(
+                    f"Strategy {strategy_id} timed out after {settings.strategy_run_timeout}s",
                 )
             except Exception as e:
-                await self._log_event(
-                    "strategy_run", "error",
-                    f"Strategy {strategy_id} failed: {e}",
-                    session=session,
-                )
+                await run_log.fail(f"Strategy {strategy_id} failed: {e}")
 
     async def _save_signals(self, session, config: Strategy, signals) -> None:
         from src.core.models import TradeSignalRecord, Instrument
@@ -195,14 +240,35 @@ class StrategyScheduler:
         await session.commit()
 
     async def _log_event(
-        self, event_type: str, level: str, message: str, session=None
+        self,
+        event_type: str,
+        level: str,
+        message: str,
+        session=None,
+        *,
+        details: dict | None = None,
     ) -> None:
+        payload = details or {}
         if session is not None:
-            session.add(SystemEvent(event_type=event_type, level=level, message=message))
+            session.add(
+                SystemEvent(
+                    event_type=event_type,
+                    level=level,
+                    message=message,
+                    details=payload,
+                )
+            )
             await session.commit()
         else:
             async with async_session_factory() as s:
-                s.add(SystemEvent(event_type=event_type, level=level, message=message))
+                s.add(
+                    SystemEvent(
+                        event_type=event_type,
+                        level=level,
+                        message=message,
+                        details=payload,
+                    )
+                )
                 await s.commit()
         if level == "error":
             logger.error("[%s] %s", event_type, message)

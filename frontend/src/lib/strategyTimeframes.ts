@@ -62,23 +62,4 @@ export function anchorTimeframeFromList(timeframes: string[]): string {
   return best
 }
 
-/** 启用实盘调度时的说明文案（不使用 Cron） */
-export function describeLiveSchedule(
-  runIntervalMinutes: number | undefined,
-  runAnchorTimeframe: string | undefined,
-  timeframes: string[],
-): string {
-  const mins = runIntervalMinutes ?? minIntervalMinutesFromTimeframes(timeframes)
-  const anchor = runAnchorTimeframe ?? anchorTimeframeFromList(timeframes)
-  if (mins < 60) {
-    return `启用后约每 ${mins} 分钟同步数据并跑策略（最短周期 ${timeframeLabel(anchor)}）`
-  }
-  if (mins < 1440) {
-    return `启用后约每 ${mins} 分钟同步数据并跑策略（最短周期 ${timeframeLabel(anchor)}）`
-  }
-  if (mins === 1440) {
-    return `启用后约每 24 小时同步并跑策略（最短周期 ${timeframeLabel(anchor)}）`
-  }
-  const days = Math.max(1, Math.round(mins / 1440))
-  return `启用后约每 ${days} 日同步并跑策略（最短周期 ${timeframeLabel(anchor)}）`
-}
+export { describeLiveSchedule } from './strategySchedule'

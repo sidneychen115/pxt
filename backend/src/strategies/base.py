@@ -59,6 +59,9 @@ class DataContext(ABC):
     async def get_latest_quote(self, symbol: str) -> dict:
         """Return latest quote dict."""
 
+    async def log_step(self, message: str, *, level: str = "info", **details) -> None:
+        """Optional live-run diagnostics; no-op unless a run logger is attached."""
+
 
 class BaseStrategy(ABC):
     """
