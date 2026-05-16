@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone, time
 from typing import TYPE_CHECKING, Any
@@ -13,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
 from src.api.deps import get_current_user
 from src.core.database import get_session, async_session_factory
-from src.core.models import Backtest, BacktestTrade, BacktestEquityCurve, Strategy, User
+from src.core.models import Backtest, BacktestTrade, BacktestEquityCurve, Instrument, Strategy, User
 from src.api.websocket import ws_manager
 from src.backtesting.exit_policy import ExitPolicy
 from src.core.app_timezone import (
@@ -25,8 +26,66 @@ from src.core.app_timezone import (
 )
 
 
+async def _merge_cached_with_yfinance(
+    sym: str,
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+    cached: "pd.DataFrame",
+    instrument_id: int,
+    *,
+    provider: "YFinanceProvider | None" = None,
+) -> "pd.DataFrame":
+    """Fill [start, end] using DB ``cached`` series and yfinance for head/tail gaps only."""
+    from src.data.providers.yfinance_provider import YFinanceProvider
+    from src.data.repository import save_bars
+
+    prov = provider or YFinanceProvider()
+
+    async def _fetch_and_save(fetch_start: datetime, fetch_end: datetime) -> "pd.DataFrame":
+        df = await prov.get_bars(sym, timeframe, fetch_start, fetch_end)
+        if not df.empty:
+            async with async_session_factory() as session:
+                await save_bars(session, instrument_id, timeframe, df)
+                await session.commit()
+        return df
+
+    if cached.empty:
+        return await _fetch_and_save(start, end)
+
+    parts = [cached]
+
+    ix_tz = cached.index.tz
+    start_ts = _pandas_ts_aligned_to_index_tz(start, ix_tz)
+    first_raw = cached.index[0]
+    ft = first_raw.to_pydatetime() if hasattr(first_raw, "to_pydatetime") else first_raw
+    first_ts = _pandas_ts_aligned_to_index_tz(ft, ix_tz)
+
+    if first_ts > start_ts:
+        df_head = await _fetch_and_save(start_ts.to_pydatetime(), first_ts.to_pydatetime())
+        if not df_head.empty:
+            parts.insert(0, df_head)
+
+    end_ts = _pandas_ts_aligned_to_index_tz(end, ix_tz)
+    last_raw = cached.index[-1]
+    lt = last_raw.to_pydatetime() if hasattr(last_raw, "to_pydatetime") else last_raw
+    last_ts = _pandas_ts_aligned_to_index_tz(lt, ix_tz)
+
+    if last_ts < end_ts:
+        df_tail = await _fetch_and_save(last_ts.to_pydatetime(), end_ts.to_pydatetime())
+        if not df_tail.empty:
+            df_tail = df_tail[df_tail.index > last_raw]
+            if not df_tail.empty:
+                parts.append(df_tail)
+
+    if len(parts) == 1:
+        return parts[0]
+    return pd.concat(parts).sort_index()
+
+
 if TYPE_CHECKING:
     import pandas as pd
+    from src.data.providers.yfinance_provider import YFinanceProvider
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
@@ -434,57 +493,16 @@ def _engine_bar_progress(backtest_id: int):
 
 async def _fetch_with_cache(sym: str, timeframe: str, start: datetime, end: datetime) -> pd.DataFrame:
     """Return bars for sym in [start, end], using DB cache and filling gaps from yfinance."""
-    import pandas as pd
-    from src.data.providers.yfinance_provider import YFinanceProvider
-    from src.data.repository import get_bars_range, save_bars, upsert_instrument
-
-    provider = YFinanceProvider()
+    from src.data.repository import get_bars_range, upsert_instrument
 
     async with async_session_factory() as session:
         instrument = await upsert_instrument(session, sym, "stock")
         await session.commit()
         instrument_id = instrument.id
         cached = await get_bars_range(session, instrument_id, timeframe, start, end)
-
-    async def _fetch_and_save(fetch_start: datetime, fetch_end: datetime) -> "pd.DataFrame":
-        df = await provider.get_bars(sym, timeframe, fetch_start, fetch_end)
-        if not df.empty:
-            async with async_session_factory() as session:
-                await save_bars(session, instrument_id, timeframe, df)
-                await session.commit()
-        return df
-
-    if cached.empty:
-        return await _fetch_and_save(start, end)
-
-    parts = [cached]
-
-    ix_tz = cached.index.tz
-    start_ts = _pandas_ts_aligned_to_index_tz(start, ix_tz)
-    first_raw = cached.index[0]
-    ft = first_raw.to_pydatetime() if hasattr(first_raw, "to_pydatetime") else first_raw
-    first_ts = _pandas_ts_aligned_to_index_tz(ft, ix_tz)
-
-    if first_ts > start_ts:
-        df_head = await _fetch_and_save(start_ts.to_pydatetime(), first_ts.to_pydatetime())
-        if not df_head.empty:
-            parts.insert(0, df_head)
-
-    end_ts = _pandas_ts_aligned_to_index_tz(end, ix_tz)
-    last_raw = cached.index[-1]
-    lt = last_raw.to_pydatetime() if hasattr(last_raw, "to_pydatetime") else last_raw
-    last_ts = _pandas_ts_aligned_to_index_tz(lt, ix_tz)
-
-    if last_ts < end_ts:
-        df_tail = await _fetch_and_save(last_ts.to_pydatetime(), end_ts.to_pydatetime())
-        if not df_tail.empty:
-            df_tail = df_tail[df_tail.index > last_raw]
-            if not df_tail.empty:
-                parts.append(df_tail)
-
-    if len(parts) == 1:
-        return parts[0]
-    return pd.concat(parts).sort_index()
+    return await _merge_cached_with_yfinance(
+        sym, timeframe, start, end, cached, instrument_id
+    )
 
 
 async def _run_backtest(backtest_id: int, req: BacktestRequest):
@@ -525,20 +543,50 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                     f"warmup+window span is {days_span} days. Shorten the backtest window or set "
                     "parameters.backtest_warmup_months lower."
                 )
-        data: dict = {}
-        n_sym = len(req.symbols)
+        bench_sym = _benchmark_symbol_from_params(req.parameters)
+        unique_syms = list(dict.fromkeys([*req.symbols, bench_sym]))
+
+        from src.data.providers.yfinance_provider import YFinanceProvider
+        from src.data.repository import get_bars_range_for_symbols, upsert_instrument
+
         await _set_backtest_progress(
             backtest_id,
             "fetching_data",
-            f"拉取行情数据 (0/{n_sym})" if n_sym else "拉取行情数据",
+            f"拉取行情: {len(unique_syms)} 标的批量读库…",
         )
-        for i, sym in enumerate(req.symbols, start=1):
-            await _set_backtest_progress(
-                backtest_id,
-                "fetching_data",
-                f"拉取行情数据: {sym} ({i}/{n_sym})",
+        async with async_session_factory() as session:
+            for sym in unique_syms:
+                await upsert_instrument(session, sym, "stock")
+            await session.commit()
+            id_rows = await session.execute(
+                select(Instrument.id, Instrument.symbol).where(Instrument.symbol.in_(unique_syms))
             )
-            df = await _fetch_with_cache(sym, timeframe, data_start, fetch_end)
+            id_by_sym = {row.symbol: row.id for row in id_rows}
+            cached_map = await get_bars_range_for_symbols(
+                session, unique_syms, timeframe, data_start, fetch_end
+            )
+
+        provider = YFinanceProvider()
+        await _set_backtest_progress(
+            backtest_id,
+            "fetching_data",
+            "拉取行情: 补全缺口（标的 + 基准并行请求）…",
+        )
+
+        async def _fill_one(sym: str):
+            return await _merge_cached_with_yfinance(
+                sym,
+                timeframe,
+                data_start,
+                fetch_end,
+                cached_map[sym],
+                id_by_sym[sym],
+                provider=provider,
+            )
+
+        filled_list = await asyncio.gather(*[_fill_one(s) for s in req.symbols])
+        data: dict = {}
+        for sym, df in zip(req.symbols, filled_list, strict=True):
             if not df.empty:
                 data[sym] = {timeframe: df}
         if not data:
@@ -547,14 +595,8 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                 f"{req.start_date}–{req.end_date}). "
                 "Check symbols, network, and for 1h/lower TFs keep the range within ~730 days."
             )
-        bench_sym = _benchmark_symbol_from_params(req.parameters)
         if bench_sym not in data:
-            await _set_backtest_progress(
-                backtest_id,
-                "fetching_data",
-                f"拉取基准 {bench_sym}（buy-hold / alpha）",
-            )
-            df_bench = await _fetch_with_cache(bench_sym, timeframe, data_start, fetch_end)
+            df_bench = await _fill_one(bench_sym)
             if not df_bench.empty:
                 data[bench_sym] = {timeframe: df_bench}
         await _set_backtest_progress(backtest_id, "engine", "回测引擎计算中…")

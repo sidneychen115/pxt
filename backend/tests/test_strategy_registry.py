@@ -9,12 +9,14 @@ def test_discover_finds_ma_crossover():
     assert "ha_month_week_band" in REGISTRY
     assert "ha_month_day_revenue_slots" in REGISTRY
     assert "ha_month_day_ma7_slots" in REGISTRY
+    assert "chan_bi_fractal_mvp" in REGISTRY
 
 
 def test_get_strategy_returns_instance():
     discover_strategies()
     strategy = get_strategy("ma_crossover")
     assert hasattr(strategy, "generate_signals")
+    assert hasattr(get_strategy("chan_bi_fractal_mvp"), "generate_signals")
 
 
 def test_get_strategy_unknown_raises():

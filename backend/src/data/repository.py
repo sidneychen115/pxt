@@ -107,6 +107,56 @@ async def get_bars_range(
     ]).set_index("bar_time").sort_index()
 
 
+_OHLC_EMPTY_COLS = ["open", "high", "low", "close", "volume", "vwap"]
+
+
+async def get_bars_range_for_symbols(
+    session: AsyncSession,
+    symbols: list[str],
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+) -> dict[str, pd.DataFrame]:
+    """Load OHLC for many tickers in one round-trip (JOIN instruments).
+
+    Every symbol in ``symbols`` appears in the result: missing series map to an empty DataFrame
+    with the standard columns.
+    """
+    if not symbols:
+        return {}
+    uniq = list(dict.fromkeys(symbols))
+    template = pd.DataFrame(columns=_OHLC_EMPTY_COLS)
+    out: dict[str, pd.DataFrame] = {s: template.copy() for s in uniq}
+    buf: dict[str, list[dict]] = {s: [] for s in uniq}
+
+    result = await session.execute(
+        select(OhlcvBar, Instrument.symbol)
+        .join(Instrument, OhlcvBar.instrument_id == Instrument.id)
+        .where(
+            Instrument.symbol.in_(uniq),
+            OhlcvBar.timeframe == timeframe,
+            OhlcvBar.bar_time >= start,
+            OhlcvBar.bar_time <= end,
+        )
+        .order_by(Instrument.symbol, OhlcvBar.bar_time)
+    )
+    for bar, sym in result.all():
+        buf[sym].append({
+            "bar_time": bar.bar_time,
+            "open": float(bar.open),
+            "high": float(bar.high),
+            "low": float(bar.low),
+            "close": float(bar.close),
+            "volume": bar.volume,
+            "vwap": float(bar.vwap) if bar.vwap is not None else None,
+        })
+    for s in uniq:
+        rows = buf[s]
+        if rows:
+            out[s] = pd.DataFrame(rows).set_index("bar_time").sort_index()
+    return out
+
+
 async def get_latest_bar_time(
     session: AsyncSession, instrument_id: int, timeframe: str
 ) -> datetime | None:
