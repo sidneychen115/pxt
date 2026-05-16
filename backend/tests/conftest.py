@@ -20,6 +20,16 @@ async def setup_db(engine):
 
 
 @pytest.fixture
+async def test_user_id(session) -> int:
+    from src.core.models import User
+
+    u = User(username="test_user")
+    session.add(u)
+    await session.flush()
+    return u.id
+
+
+@pytest.fixture
 async def session(engine) -> AsyncSession:
     async with engine.connect() as conn:
         await conn.begin()

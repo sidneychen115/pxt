@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     ha_lookback_months: int = 24
     # Weeks of daily history for HA week-anchor cold-start (Mon–Fri weeks).
     ha_lookback_weeks: int = 24
+    # SEC EDGAR requires a descriptive User-Agent (application name + contact email).
+    sec_edgar_user_agent: str = "pxt-data research@localhost"
 
 
 settings = Settings()

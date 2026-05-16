@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import json
+import time
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+from src.strategies.heikin_ashi import _frame_has_column
+
+_DEBUG_LOG = "/home/imxichen/projects/pxt/.cursor/debug-e52f46.log"
+_DEBUG_SESSION = "e52f46"
 
 
 def quote_mark_price(quote: dict) -> float | None:
@@ -70,8 +77,32 @@ def merge_snapshot_close_into_daily(
         "low": min(open_px, price),
         "close": price,
     }
-    if "volume" in out.columns:
+    # #region agent log
+    try:
+        cols = getattr(out, "columns", "NO_ATTR")
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {
+                        "sessionId": _DEBUG_SESSION,
+                        "hypothesisId": "H2",
+                        "location": "snapshot_bars.py:merge_snapshot_close",
+                        "message": "out.columns before membership check",
+                        "data": {
+                            "cols_is_none": cols is None,
+                            "cols_type": type(cols).__name__ if cols is not None else None,
+                        },
+                        "timestamp": int(time.time() * 1000),
+                        "runId": "pre-fix",
+                    }
+                )
+                + "\n"
+            )
+    except OSError:
+        pass
+    # #endregion
+    if _frame_has_column(out, "volume"):
         new_row["volume"] = 0.0
-    if "vwap" in out.columns:
+    if _frame_has_column(out, "vwap"):
         new_row["vwap"] = None
     return pd.concat([out, pd.DataFrame([new_row], index=[idx])]).sort_index()

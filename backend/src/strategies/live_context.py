@@ -35,6 +35,11 @@ class LiveDataContext(DataContext):
         self._run_logger = run_logger
         self._tz = _TZ
 
+    @property
+    def sql_session(self) -> AsyncSession:
+        """Read-only Postgres session for fundamentals / HA cache queries."""
+        return self._session
+
     async def log_step(self, message: str, *, level: str = "info", **details) -> None:
         if self._run_logger is not None:
             await self._run_logger.step(message, level=level, **details)

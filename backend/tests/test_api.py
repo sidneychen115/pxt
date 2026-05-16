@@ -33,6 +33,12 @@ async def test_list_signals_empty(client: AsyncClient):
     assert response.json() == []
 
 
+async def test_list_signal_runs_empty(client: AsyncClient):
+    response = await client.get("/api/signals/runs")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
 async def test_list_backtests_empty(client: AsyncClient):
     response = await client.get("/api/backtests/")
     assert response.status_code == 200

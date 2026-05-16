@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 import pandas as pd
 from src.strategies.base import DataContext
 
@@ -44,3 +44,9 @@ class BacktestDataContext(DataContext):
         if df.empty:
             return {}
         return {"symbol": symbol, "last": float(df["close"].iloc[-1])}
+
+    async def decision_time(self) -> datetime:
+        t = self._current_time
+        if t.tzinfo is None:
+            return t.replace(tzinfo=timezone.utc)
+        return t.astimezone(timezone.utc)

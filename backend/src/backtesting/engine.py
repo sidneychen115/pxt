@@ -4,6 +4,50 @@ from dataclasses import dataclass
 from datetime import datetime
 
 import pandas as pd
+
+
+def _simulation_bar_indices(
+    all_times: list,
+    *,
+    simulation_start: datetime | None,
+    simulation_end: datetime | None,
+    fill_mode: str,
+) -> tuple[list[int], int]:
+    """Indices into ``all_times`` for the user-visible window. Warm-up bars stay in ``data`` only.
+
+    Returns ``(bar_list, i1)`` where ``i1`` is the last bar index included in the simulation.
+    """
+    n = len(all_times)
+    if n < 2:
+        raise ValueError("Insufficient data for backtesting.")
+    ts_list = [pd.Timestamp(t) for t in all_times]
+    if simulation_start is None:
+        i0 = 0
+    else:
+        s0 = pd.Timestamp(simulation_start)
+        i0 = next((i for i, t in enumerate(ts_list) if t >= s0), None)
+        if i0 is None:
+            raise ValueError("simulation_start is after all available bars.")
+    if simulation_end is None:
+        i1 = n - 1
+    else:
+        s1 = pd.Timestamp(simulation_end)
+        i1 = None
+        for j in range(n - 1, -1, -1):
+            if ts_list[j] <= s1:
+                i1 = j
+                break
+        if i1 is None:
+            raise ValueError("simulation_end is before all available bars.")
+    if i1 < i0:
+        raise ValueError("Simulation date window has no bars.")
+    if fill_mode == "same_close":
+        bar_list = list(range(i0, min(i1 + 1, n)))
+    else:
+        bar_list = list(range(i0, i1))
+    if not bar_list:
+        raise ValueError("No bars in simulation window for this fill_mode.")
+    return bar_list, i1
 from src.strategies.base import BaseStrategy, PortfolioSnapshot, TradeSignal
 from src.backtesting.data_context import BacktestDataContext
 from src.backtesting.exit_policy import ExitPolicy
@@ -69,7 +113,12 @@ class BacktestEngine:
             fill_time = future.index[0]
 
         if sig.direction == "buy" and sym not in positions:
-            qty = sig.quantity or max(1, int(cash * 0.1 / fill_price))
+            if sig.quantity is not None:
+                qty = float(sig.quantity)
+                if qty <= 0:
+                    return False, cash
+            else:
+                qty = float(max(1, int(cash * 0.1 / fill_price)))
             cost = qty * fill_price
             if cost <= cash:
                 new_cash = cash - cost
@@ -229,10 +278,16 @@ class BacktestEngine:
         data: dict[str, dict[str, pd.DataFrame]],
         timeframe: str = "1d",
         *,
+        simulation_start: datetime | None = None,
+        simulation_end: datetime | None = None,
         bar_progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> BacktestMetrics:
         """Simulate strategy on historical data.
         data: {symbol: {timeframe: pd.DataFrame with DatetimeIndex}}
+
+        
+        If ``simulation_start`` / ``simulation_end`` are set, bars before start are only used
+        for strategies (e.g. long lookback HA); equity and fills are computed from start onward.
         """
         all_times = sorted({
             ts
@@ -241,8 +296,13 @@ class BacktestEngine:
             if tf == timeframe
             for ts in df.index
         })
-        if len(all_times) < 2:
-            raise ValueError("Insufficient data for backtesting.")
+        bar_list, i1 = _simulation_bar_indices(
+            all_times,
+            simulation_start=simulation_start,
+            simulation_end=simulation_end,
+            fill_mode=self._fill_mode,
+        )
+        last_time = all_times[i1]
 
         # Yield so the event loop can serve HTTP polls / WS right after entering engine phase.
         await asyncio.sleep(0)
@@ -255,8 +315,6 @@ class BacktestEngine:
         closed_trades: list[TradeRecord] = []
         equity_series: dict[datetime, float] = {}
 
-        bar_indices = range(len(all_times)) if self._fill_mode == "same_close" else range(len(all_times) - 1)
-        bar_list = list(bar_indices)
         n_bars = len(bar_list)
         report_stride = max(1, min(2500, n_bars // 80)) if n_bars else 1
 
@@ -318,7 +376,10 @@ class BacktestEngine:
                 ctx = BacktestDataContext(data, current_time, inclusive_end=inclusive)
                 equity = self._account_equity(cash, positions, data, timeframe, current_time)
                 snapshot = PortfolioSnapshot(
-                    cash=cash, initial_capital=self._capital, equity=equity
+                    cash=cash,
+                    initial_capital=self._capital,
+                    equity=equity,
+                    positions={sym: float(st.trade.quantity) for sym, st in positions.items()},
                 )
                 signals = await strategy.generate_signals(symbols, parameters, ctx, portfolio=snapshot)
                 if not signals:
@@ -357,7 +418,6 @@ class BacktestEngine:
             equity_series[current_time] = portfolio_value
 
         # Settle any pending close-mode exits at last bar's open
-        last_time = all_times[-1]
         for sym, (reason, state) in list(pending_close_exits.items()):
             bar_df = data.get(sym, {}).get(timeframe)
             if bar_df is not None and not bar_df.empty:
@@ -380,7 +440,11 @@ class BacktestEngine:
         for sym, state in list(positions.items()):
             tf_df = data.get(sym, {}).get(timeframe)
             if tf_df is not None and not tf_df.empty:
-                last_price = float(tf_df["close"].iloc[-1])
+                el = tf_df[tf_df.index <= last_time]
+                if el.empty:
+                    last_price = float(tf_df["close"].iloc[-1])
+                else:
+                    last_price = float(el["close"].iloc[-1])
                 cash += state.trade.quantity * last_price
                 state.trade.exit_time = last_time
                 state.trade.exit_price = last_price

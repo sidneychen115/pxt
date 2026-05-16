@@ -1,18 +1,29 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from datetime import date, datetime, timedelta, timezone, time
+from typing import TYPE_CHECKING, Any
 
+
+from dateutil.relativedelta import relativedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, desc, update
+from sqlalchemy import select, desc, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import defer
+from src.api.deps import get_current_user
 from src.core.database import get_session, async_session_factory
-from src.core.models import Backtest, BacktestTrade, BacktestEquityCurve, Strategy
+from src.core.models import Backtest, BacktestTrade, BacktestEquityCurve, Strategy, User
 from src.api.websocket import ws_manager
 from src.backtesting.exit_policy import ExitPolicy
+from src.core.app_timezone import (
+    api_iso,
+    api_iso_equity_daily_session,
+    app_zone,
+    daily_bar_timestamp_for_session_date,
+    equity_daily_session_calendar_date,
+)
+
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -20,8 +31,50 @@ if TYPE_CHECKING:
 router = APIRouter()
 _log = logging.getLogger(__name__)
 
+
+async def _require_backtest(
+    backtest_id: int, user: User, session: AsyncSession
+) -> Backtest:
+    result = await session.execute(
+        select(Backtest).where(Backtest.id == backtest_id, Backtest.user_id == user.id)
+    )
+    bt = result.scalar_one_or_none()
+    if not bt:
+        raise HTTPException(404, "Backtest not found.")
+    return bt
+
+
+async def _pnl_aggregate_by_symbol(session: AsyncSession, backtest_id: int) -> list[dict[str, Any]]:
+    """Per-symbol realized P&L sum and trade row count from ``backtest_trades``."""
+    stmt = (
+        select(
+            BacktestTrade.symbol,
+            func.coalesce(func.sum(BacktestTrade.pnl), 0).label("total_pnl"),
+            func.count().label("trade_count"),
+        )
+        .where(BacktestTrade.backtest_id == backtest_id)
+        .group_by(BacktestTrade.symbol)
+        .order_by(BacktestTrade.symbol.asc())
+    )
+    result = await session.execute(stmt)
+    return [
+        {
+            "symbol": row.symbol,
+            "total_pnl": float(row.total_pnl),
+            "trade_count": int(row.trade_count),
+        }
+        for row in result.all()
+    ]
+
+
 # yfinance intraday caps (see YFinanceProvider); used for validation and messages
 _INTRADAY_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "4h"})
+
+
+def _benchmark_symbol_from_params(parameters: dict) -> str:
+    """Ticker used for buy-hold / alpha (defaults SPY); normalize for cache keys."""
+    s = str(parameters.get("benchmark_symbol") or "SPY").strip().upper()
+    return s or "SPY"
 
 
 class BacktestRequest(BaseModel):
@@ -38,11 +91,13 @@ class BacktestRequest(BaseModel):
 async def list_backtests(
     strategy_id: str | None = None,
     limit: int = Query(20, ge=1, le=200),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
     # Do not load llm_evaluation (often huge TEXT / TOAST) for the list — it was dominating I/O and JSON size.
     query = (
         select(Backtest)
+        .where(Backtest.user_id == user.id)
         .options(defer(Backtest.llm_evaluation))
         .order_by(desc(Backtest.created_at))
         .limit(limit)
@@ -57,10 +112,12 @@ async def list_backtests(
 async def trigger_backtest(
     req: BacktestRequest,
     background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
     started = datetime.now(timezone.utc)
     bt = Backtest(
+        user_id=user.id,
         strategy_id=req.strategy_id,
         start_date=req.start_date,
         end_date=req.end_date,
@@ -79,12 +136,18 @@ async def trigger_backtest(
 
 
 @router.get("/{backtest_id}")
-async def get_backtest(backtest_id: int, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(select(Backtest).where(Backtest.id == backtest_id))
-    bt = result.scalar_one_or_none()
-    if not bt:
-        raise HTTPException(404, "Backtest not found.")
-    return _backtest_summary(bt)
+async def get_backtest(
+    backtest_id: int,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    bt = await _require_backtest(backtest_id, user, session)
+    summary = _backtest_summary(bt)
+    if bt.status == "completed":
+        summary["pnl_by_symbol"] = await _pnl_aggregate_by_symbol(session, backtest_id)
+    else:
+        summary["pnl_by_symbol"] = None
+    return summary
 
 
 @router.get("/{backtest_id}/trades")
@@ -92,8 +155,11 @@ async def get_backtest_trades(
     backtest_id: int,
     sort_by: str = "entry_time",
     order: str = "asc",
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
+    bt = await _require_backtest(backtest_id, user, session)
+    tf = await _resolve_timeframe_from_params(bt.strategy_id, bt.parameters or {})
     _ALLOWED_SORT = {"entry_time", "exit_time", "pnl", "pnl_pct", "symbol", "hold_days"}
     col_name = sort_by if sort_by in _ALLOWED_SORT else "entry_time"
     col = getattr(BacktestTrade, col_name)
@@ -104,12 +170,14 @@ async def get_backtest_trades(
         .order_by(direction)
     )
     trades = result.scalars().all()
+    use_sess = tf in _DAILY_LIKE_TIMEFRAMES
+    iso_bar = api_iso_equity_daily_session if use_sess else api_iso
     return [
         {
             "id": t.id, "symbol": t.symbol, "direction": t.direction,
-            "quantity": float(t.quantity), "entry_time": t.entry_time,
+            "quantity": float(t.quantity), "entry_time": iso_bar(t.entry_time),
             "entry_price": float(t.entry_price),
-            "exit_time": t.exit_time,
+            "exit_time": iso_bar(t.exit_time) if t.exit_time else None,
             "exit_price": float(t.exit_price) if t.exit_price else None,
             "pnl": float(t.pnl) if t.pnl else None,
             "pnl_pct": float(t.pnl_pct) if t.pnl_pct else None,
@@ -125,8 +193,10 @@ async def get_backtest_trades(
 async def get_equity_curve(
     backtest_id: int,
     max_points: int = Query(4000, ge=200, le=50_000),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
+    await _require_backtest(backtest_id, user, session)
     result = await session.execute(
         select(BacktestEquityCurve)
         .where(BacktestEquityCurve.backtest_id == backtest_id)
@@ -140,7 +210,7 @@ async def get_equity_curve(
         idxs = {int(round(i * (n - 1) / (take - 1))) for i in range(take)}
         points = [points[i] for i in sorted(idxs)]
     return [
-        {"ts": p.ts, "equity": float(p.equity),
+        {"ts": api_iso(p.ts), "equity": float(p.equity),
          "cash": float(p.cash), "drawdown": float(p.drawdown) if p.drawdown else None}
         for p in points
     ]
@@ -149,13 +219,26 @@ async def get_equity_curve(
 _DAILY_LIKE_TIMEFRAMES = frozenset({"1d", "1wk", "1mo"})
 
 
+def _pandas_ts_aligned_to_index_tz(ts_raw: datetime, index_tz):
+    """Match bar index tz (Chicago for migrated daily caches; UTC legacy intraday)."""
+    import pandas as pd
+
+    ts = pd.Timestamp(ts_raw)
+    if index_tz is None:
+        return ts.tz_localize(timezone.utc) if ts.tz is None else ts.tz_convert(timezone.utc)
+    if ts.tz is None:
+        return ts.tz_localize(timezone.utc).tz_convert(index_tz)
+    return ts.tz_convert(index_tz)
+
+
 def _encode_ohlc_bar_time(timeframe: str, ts: datetime) -> str | int:
-    """Chart time: business-day string for daily+ aggregates, UTC unix seconds for intraday."""
+    """Chart time: equity session calendar YYYY-MM-DD for daily+; unix seconds UTC for intraday."""
     if timeframe in _DAILY_LIKE_TIMEFRAMES:
         t = ts
-        if getattr(ts, "tzinfo", None):
-            t = ts.astimezone(timezone.utc)
-        return t.strftime("%Y-%m-%d")
+        if getattr(ts, "tzinfo", None) is None:
+            t = ts.replace(tzinfo=timezone.utc)
+        sess = equity_daily_session_calendar_date(t)
+        return sess.strftime("%Y-%m-%d")
     t = ts if getattr(ts, "tzinfo", None) else ts.replace(tzinfo=timezone.utc)
     if getattr(t, "tzinfo", None) is None:
         t = t.replace(tzinfo=timezone.utc)
@@ -165,15 +248,9 @@ def _encode_ohlc_bar_time(timeframe: str, ts: datetime) -> str | int:
 
 
 def _trade_event_bar_index(index: pd.DatetimeIndex, event_time: datetime) -> int | None:
-    import pandas as pd
-
     if index.empty or event_time is None:
         return None
-    t = pd.Timestamp(event_time)
-    if t.tzinfo is None:
-        t = t.tz_localize("UTC")
-    else:
-        t = t.tz_convert("UTC")
+    t = _pandas_ts_aligned_to_index_tz(event_time, index.tz)
     pos = int(index.get_indexer([t], method="nearest")[0])
     if pos < 0:
         return None
@@ -207,28 +284,30 @@ async def get_backtest_ohlc(
     backtest_id: int,
     symbol: str = Query(..., min_length=1),
     max_points: int = Query(4000, ge=200, le=50_000),
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
     """OHLC bars for one symbol over the backtest window (same fetch path as the engine)."""
-    result = await session.execute(select(Backtest).where(Backtest.id == backtest_id))
-    bt = result.scalar_one_or_none()
-    if not bt:
-        raise HTTPException(404, "Backtest not found.")
+    bt = await _require_backtest(backtest_id, user, session)
     if symbol not in bt.symbols:
         raise HTTPException(400, "symbol is not part of this backtest.")
     if bt.status != "completed":
         raise HTTPException(409, "OHLC is only available for completed backtests.")
 
     timeframe = await _resolve_timeframe_from_params(bt.strategy_id, bt.parameters or {})
-    start = datetime(bt.start_date.year, bt.start_date.month, bt.start_date.day, tzinfo=timezone.utc)
-    end = datetime(bt.end_date.year, bt.end_date.month, bt.end_date.day, tzinfo=timezone.utc) + timedelta(days=1)
+    z = app_zone()
     if timeframe in _INTRADAY_TIMEFRAMES:
+        start = datetime.combine(bt.start_date, time.min, tzinfo=z)
+        end = datetime.combine(bt.end_date + timedelta(days=1), time.min, tzinfo=z)
         days_span = (end - start).days
         if days_span > 730:
             raise HTTPException(
                 400,
                 f"yfinance intraday data ({timeframe}) is limited to about 730 days; this range is {days_span} days.",
             )
+    else:
+        start = daily_bar_timestamp_for_session_date(bt.start_date)
+        end = daily_bar_timestamp_for_session_date(bt.end_date)
 
     trades_result = await session.execute(
         select(BacktestTrade).where(
@@ -290,12 +369,12 @@ def _backtest_summary(bt: Backtest, *, include_llm: bool = True) -> dict:
         "alpha_vs_benchmark": float(bt.alpha_vs_benchmark) if bt.alpha_vs_benchmark is not None else None,
         "llm_evaluation": bt.llm_evaluation if include_llm else None,
         "llm_model": bt.llm_model,
-        "created_at": bt.created_at, "completed_at": bt.completed_at,
+        "created_at": api_iso(bt.created_at), "completed_at": api_iso(bt.completed_at),
         "parameters": bt.parameters or {},
         "exit_policy": bt.exit_policy,
         "progress_phase": bt.progress_phase,
         "progress_message": bt.progress_message,
-        "progress_updated_at": bt.progress_updated_at,
+        "progress_updated_at": api_iso(bt.progress_updated_at),
         "error_message": bt.error_message,
     }
 
@@ -336,7 +415,7 @@ async def _set_backtest_progress(backtest_id: int, phase: str, message: str | No
             "backtest_id": backtest_id,
             "phase": phase,
             "message": message,
-            "progress_updated_at": now.isoformat(),
+            "progress_updated_at": api_iso(now),
         },
     )
 
@@ -380,19 +459,26 @@ async def _fetch_with_cache(sym: str, timeframe: str, start: datetime, end: date
 
     parts = [cached]
 
-    # Fill missing head
-    first_cached = cached.index[0]
-    if first_cached.to_pydatetime().replace(tzinfo=timezone.utc) > start:
-        df_head = await _fetch_and_save(start, first_cached.to_pydatetime().replace(tzinfo=timezone.utc))
+    ix_tz = cached.index.tz
+    start_ts = _pandas_ts_aligned_to_index_tz(start, ix_tz)
+    first_raw = cached.index[0]
+    ft = first_raw.to_pydatetime() if hasattr(first_raw, "to_pydatetime") else first_raw
+    first_ts = _pandas_ts_aligned_to_index_tz(ft, ix_tz)
+
+    if first_ts > start_ts:
+        df_head = await _fetch_and_save(start_ts.to_pydatetime(), first_ts.to_pydatetime())
         if not df_head.empty:
             parts.insert(0, df_head)
 
-    # Fill missing tail
-    last_cached = cached.index[-1]
-    if last_cached.to_pydatetime().replace(tzinfo=timezone.utc) < end:
-        df_tail = await _fetch_and_save(last_cached.to_pydatetime().replace(tzinfo=timezone.utc), end)
+    end_ts = _pandas_ts_aligned_to_index_tz(end, ix_tz)
+    last_raw = cached.index[-1]
+    lt = last_raw.to_pydatetime() if hasattr(last_raw, "to_pydatetime") else last_raw
+    last_ts = _pandas_ts_aligned_to_index_tz(lt, ix_tz)
+
+    if last_ts < end_ts:
+        df_tail = await _fetch_and_save(last_ts.to_pydatetime(), end_ts.to_pydatetime())
         if not df_tail.empty:
-            df_tail = df_tail[df_tail.index > last_cached]
+            df_tail = df_tail[df_tail.index > last_raw]
             if not df_tail.empty:
                 parts.append(df_tail)
 
@@ -408,18 +494,36 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
     discover_strategies()
     try:
         timeframe = await _resolve_backtest_timeframe(req)
-        start = datetime(req.start_date.year, req.start_date.month, req.start_date.day, tzinfo=timezone.utc)
-        # Exclusive end at start of day after end_date so [start, end) includes all bars on end_date
-        # (avoids empty range when start_date == end_date and fixes yfinance daily/hourly end semantics).
-        end = datetime(req.end_date.year, req.end_date.month, req.end_date.day, tzinfo=timezone.utc) + timedelta(days=1)
-        if start >= end:
-            raise ValueError("Invalid date range: start_date must be on or before end_date.")
+        z = app_zone()
         if timeframe in _INTRADAY_TIMEFRAMES:
-            days_span = (end - start).days
+            sim_start = datetime.combine(req.start_date, time.min, tzinfo=z)
+            sim_end = datetime.combine(req.end_date + timedelta(days=1), time.min, tzinfo=z)
+        else:
+            sim_start = daily_bar_timestamp_for_session_date(req.start_date)
+            sim_end = daily_bar_timestamp_for_session_date(req.end_date)
+        if sim_start > sim_end:
+            raise ValueError("Invalid date range: start_date must be on or before end_date.")
+        try:
+            warmup_m = int((req.parameters or {}).get("backtest_warmup_months", 24))
+        except (TypeError, ValueError):
+            warmup_m = 24
+        warmup_m = max(0, min(warmup_m, 120))
+        if timeframe in _INTRADAY_TIMEFRAMES:
+            fetch_start_date = req.start_date - relativedelta(months=warmup_m)
+            data_start = datetime.combine(fetch_start_date, time.min, tzinfo=z)
+        else:
+            fetch_start_date = req.start_date - relativedelta(months=warmup_m)
+            data_start = daily_bar_timestamp_for_session_date(fetch_start_date)
+        if data_start > sim_start:
+            data_start = sim_start
+        fetch_end = sim_end
+        if timeframe in _INTRADAY_TIMEFRAMES:
+            days_span = (fetch_end - data_start).days
             if days_span > 730:
                 raise ValueError(
                     f"yfinance intraday data ({timeframe}) is limited to about 730 days; "
-                    f"this range is {days_span} days. Shorten the backtest window."
+                    f"warmup+window span is {days_span} days. Shorten the backtest window or set "
+                    "parameters.backtest_warmup_months lower."
                 )
         data: dict = {}
         n_sym = len(req.symbols)
@@ -434,7 +538,7 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                 "fetching_data",
                 f"拉取行情数据: {sym} ({i}/{n_sym})",
             )
-            df = await _fetch_with_cache(sym, timeframe, start, end)
+            df = await _fetch_with_cache(sym, timeframe, data_start, fetch_end)
             if not df.empty:
                 data[sym] = {timeframe: df}
         if not data:
@@ -443,6 +547,16 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                 f"{req.start_date}–{req.end_date}). "
                 "Check symbols, network, and for 1h/lower TFs keep the range within ~730 days."
             )
+        bench_sym = _benchmark_symbol_from_params(req.parameters)
+        if bench_sym not in data:
+            await _set_backtest_progress(
+                backtest_id,
+                "fetching_data",
+                f"拉取基准 {bench_sym}（buy-hold / alpha）",
+            )
+            df_bench = await _fetch_with_cache(bench_sym, timeframe, data_start, fetch_end)
+            if not df_bench.empty:
+                data[bench_sym] = {timeframe: df_bench}
         await _set_backtest_progress(backtest_id, "engine", "回测引擎计算中…")
         strategy = REGISTRY[req.strategy_id]()
         run_params = dict(req.parameters)
@@ -468,11 +582,12 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
             run_params,
             data,
             timeframe,
+            simulation_start=sim_start,
+            simulation_end=sim_end,
             bar_progress=_engine_bar_progress(backtest_id),
         )
         from src.backtesting.benchmark import enrich_metrics_with_benchmark
 
-        bench_sym = str(req.parameters.get("benchmark_symbol", "SPY"))
         metrics = enrich_metrics_with_benchmark(
             metrics, data, benchmark_symbol=bench_sym, timeframe=timeframe
         )

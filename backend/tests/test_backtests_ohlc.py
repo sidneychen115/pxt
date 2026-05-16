@@ -7,23 +7,38 @@ from unittest.mock import AsyncMock, patch
 import pandas as pd
 from httpx import ASGITransport, AsyncClient
 
+from src.api.deps import get_current_user
 from src.api.main import app
 from src.core.database import get_session
-from src.core.models import Backtest, BacktestTrade, Strategy
+from src.core.models import Backtest, BacktestTrade, Strategy, User
 
 
 @pytest.fixture
-async def client(session):
+async def ohlc_user(session):
+    u = User(username="ohlc_test_user")
+    session.add(u)
+    await session.flush()
+    return u
+
+
+@pytest.fixture
+async def client(session, ohlc_user):
     async def _override():
         yield session
 
+    async def _user_override():
+        return ohlc_user
+
     app.dependency_overrides[get_session] = _override
+    app.dependency_overrides[get_current_user] = _user_override
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
 
 
-async def _seed_strategy_and_backtest(session, *, status: str = "completed") -> Backtest:
+async def _seed_strategy_and_backtest(
+    session, user_id: int, *, status: str = "completed"
+) -> Backtest:
     st = Strategy(
         id="test_strat_ohlc_api",
         name="Ohlc Test Strat",
@@ -37,6 +52,7 @@ async def _seed_strategy_and_backtest(session, *, status: str = "completed") -> 
     )
     session.add(st)
     bt = Backtest(
+        user_id=user_id,
         strategy_id=st.id,
         start_date=date(2024, 1, 1),
         end_date=date(2024, 1, 10),
@@ -56,21 +72,21 @@ async def test_backtest_ohlc_404(client: AsyncClient):
     assert r.status_code == 404
 
 
-async def test_backtest_ohlc_bad_symbol(client: AsyncClient, session):
-    bt = await _seed_strategy_and_backtest(session)
+async def test_backtest_ohlc_bad_symbol(client: AsyncClient, session, ohlc_user):
+    bt = await _seed_strategy_and_backtest(session, ohlc_user.id)
     r = await client.get(f"/api/backtests/{bt.id}/ohlc?symbol=INVALID")
     assert r.status_code == 400
     assert "not part" in r.json()["detail"].lower()
 
 
-async def test_backtest_ohlc_not_completed(client: AsyncClient, session):
-    bt = await _seed_strategy_and_backtest(session, status="running")
+async def test_backtest_ohlc_not_completed(client: AsyncClient, session, ohlc_user):
+    bt = await _seed_strategy_and_backtest(session, ohlc_user.id, status="running")
     r = await client.get(f"/api/backtests/{bt.id}/ohlc?symbol=SPY")
     assert r.status_code == 409
 
 
-async def test_backtest_ohlc_completed_returns_bars(client: AsyncClient, session):
-    bt = await _seed_strategy_and_backtest(session, status="completed")
+async def test_backtest_ohlc_completed_returns_bars(client: AsyncClient, session, ohlc_user):
+    bt = await _seed_strategy_and_backtest(session, ohlc_user.id, status="completed")
     idx = pd.date_range("2024-01-01", periods=8, freq="D", tz="UTC")
     df = pd.DataFrame(
         {
@@ -113,8 +129,8 @@ async def test_backtest_ohlc_completed_returns_bars(client: AsyncClient, session
     m.assert_awaited_once()
 
 
-async def test_backtest_ohlc_subsample_keeps_trade_bars(client: AsyncClient, session):
-    bt = await _seed_strategy_and_backtest(session, status="completed")
+async def test_backtest_ohlc_subsample_keeps_trade_bars(client: AsyncClient, session, ohlc_user):
+    bt = await _seed_strategy_and_backtest(session, ohlc_user.id, status="completed")
     n = 500
     idx = pd.date_range("2024-01-01", periods=n, freq="D", tz="UTC")
     df = pd.DataFrame(

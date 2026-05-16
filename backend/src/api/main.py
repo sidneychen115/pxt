@@ -5,7 +5,16 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.backtest_stale_reaper import run_backtest_stale_reaper
-from src.api.routers import strategies, signals, backtests, backtest_presets, system
+from src.api.routers import (
+    auth,
+    strategies,
+    signals,
+    backtests,
+    backtest_presets,
+    system,
+    me_strategies,
+    me_positions,
+)
 from src.api.websocket import ws_manager
 from src.scheduler.runner import StrategyScheduler
 
@@ -37,6 +46,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(me_strategies.router, prefix="/api/me/strategies", tags=["me-strategies"])
+app.include_router(me_positions.router, prefix="/api/me/positions", tags=["me-positions"])
 app.include_router(strategies.router, prefix="/api/strategies", tags=["strategies"])
 app.include_router(signals.router, prefix="/api/signals", tags=["signals"])
 app.include_router(backtests.router, prefix="/api/backtests", tags=["backtests"])

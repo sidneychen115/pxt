@@ -29,20 +29,8 @@ import {
   presetBodyFromSnapshot,
   snapshotFromCurrentForm,
 } from '../lib/backtestPresets'
-
-function formatBacktestDateTime(iso: string | null | undefined): string {
-  if (iso == null || iso === '') return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return '—'
-  return d.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-}
+import { useAuthQueryKey } from '../hooks/useAuthQueryKey'
+import { formatAppDateOnly, formatAppDateTime } from '../lib/formatTime'
 
 function formatIsoDateShort(iso: string | null | undefined): string {
   if (iso == null || iso === '') return '—'
@@ -262,6 +250,8 @@ function BacktestList() {
   const navigate = useNavigate()
   const location = useLocation()
   const qc = useQueryClient()
+  const backtestsKey = useAuthQueryKey('backtests')
+  const presetsKey = useAuthQueryKey('backtest-presets')
   const {
     data: backtests,
     isPending: backtestsPending,
@@ -269,11 +259,11 @@ function BacktestList() {
     error: backtestsErrorObj,
     refetch: refetchBacktests,
   } = useQuery({
-    queryKey: ['backtests'],
+    queryKey: backtestsKey,
     queryFn: () => fetchBacktests(),
   })
   const { data: strategies } = useQuery({ queryKey: ['strategies'], queryFn: fetchStrategies })
-  const { data: presetDtos } = useQuery({ queryKey: ['backtest-presets'], queryFn: fetchBacktestPresets })
+  const { data: presetDtos } = useQuery({ queryKey: presetsKey, queryFn: fetchBacktestPresets })
   const presets = useMemo(() => (presetDtos ?? []).map(dtoToPreset), [presetDtos])
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({
@@ -395,7 +385,7 @@ function BacktestList() {
       return createBacktestPreset(presetBodyFromSnapshot(snap, name))
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['backtest-presets'] })
+      qc.invalidateQueries({ queryKey: presetsKey })
       setSavePresetName('')
     },
   })
@@ -426,7 +416,7 @@ function BacktestList() {
     },
     onSuccess: (data) => {
       setShowForm(false)
-      qc.invalidateQueries({ queryKey: ['backtests'] })
+      qc.invalidateQueries({ queryKey: backtestsKey })
       navigate(`/backtests/${data.id}`)
     },
   })
@@ -679,7 +669,7 @@ function BacktestList() {
                     {bt.total_trades != null ? String(bt.total_trades) : '—'}
                   </td>
                   <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtNum(bt.avg_hold_days, 1)}</td>
-                  <td className="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">{formatBacktestDateTime(bt.created_at)}</td>
+                  <td className="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">{formatAppDateTime(bt.created_at)}</td>
                   <td className="px-3 py-2 text-gray-400 whitespace-nowrap">{formatIsoDateShort(bt.start_date)}</td>
                   <td className="px-3 py-2 text-gray-400 whitespace-nowrap">{formatIsoDateShort(bt.end_date)}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
@@ -708,14 +698,19 @@ function BacktestList() {
 function BacktestDetail({ id }: { id: number }) {
   const navigate = useNavigate()
   const qc = useQueryClient()
+  const backtestKey = useAuthQueryKey('backtest', id)
+  const backtestsKey = useAuthQueryKey('backtests')
+  const btTradesKey = useAuthQueryKey('bt-trades', id)
+  const btEquityKey = useAuthQueryKey('bt-equity', id)
   const [tradeSortRules, setTradeSortRules] = useState<TradeSortRule[]>([])
   const [chartSymbol, setChartSymbol] = useState<string | null>(null)
+  const btOhlcKey = useAuthQueryKey('bt-ohlc', id, chartSymbol)
   const [chartFocusTradeId, setChartFocusTradeId] = useState<number | null>(null)
   const { data: bt, isLoading } = useQuery({
-    queryKey: ['backtest', id],
+    queryKey: backtestKey,
     queryFn: async () => {
       const next = await fetchBacktest(id)
-      return mergeRunningBacktestProgress(qc.getQueryData<Backtest>(['backtest', id]), next)
+      return mergeRunningBacktestProgress(qc.getQueryData<Backtest>(backtestKey), next)
     },
     refetchInterval: (q) => (q.state.data?.status === 'running' ? 2500 : false),
   })
@@ -738,14 +733,14 @@ function BacktestDetail({ id }: { id: number }) {
         }
         if (msg.channel !== 'backtest_progress' || msg.data.backtest_id !== id) return
         if (msg.data.status === 'completed' || msg.data.status === 'failed') {
-          qc.invalidateQueries({ queryKey: ['backtest', id] })
-          qc.invalidateQueries({ queryKey: ['backtests'] })
-          qc.invalidateQueries({ queryKey: ['bt-ohlc', id] })
-          qc.invalidateQueries({ queryKey: ['bt-trades', id] })
-          qc.invalidateQueries({ queryKey: ['bt-equity', id] })
+          qc.invalidateQueries({ queryKey: backtestKey })
+          qc.invalidateQueries({ queryKey: backtestsKey })
+          qc.invalidateQueries({ queryKey: btOhlcKey })
+          qc.invalidateQueries({ queryKey: btTradesKey })
+          qc.invalidateQueries({ queryKey: btEquityKey })
           return
         }
-        qc.setQueryData(['backtest', id], (prev: Backtest | undefined) => {
+        qc.setQueryData(backtestKey, (prev: Backtest | undefined) => {
           if (!prev) return prev
           const ph = msg.data.phase
           return {
@@ -765,7 +760,7 @@ function BacktestDetail({ id }: { id: number }) {
     return () => {
       ws.close()
     }
-  }, [id, bt?.status, qc])
+  }, [id, bt?.status, qc, backtestKey, backtestsKey, btOhlcKey, btTradesKey, btEquityKey])
 
   useEffect(() => {
     if (!bt?.symbols?.length) return
@@ -780,7 +775,7 @@ function BacktestDetail({ id }: { id: number }) {
     chartSymbol && bt?.symbols?.includes(chartSymbol) ? chartSymbol : (bt?.symbols?.[0] ?? '')
 
   const { data: trades } = useQuery({
-    queryKey: ['bt-trades', id],
+    queryKey: btTradesKey,
     queryFn: () => fetchBacktestTrades(id),
     enabled: bt?.status === 'completed',
   })
@@ -853,7 +848,7 @@ function BacktestDetail({ id }: { id: number }) {
     return `${dir}${idx + 1}`
   }
   const { data: equity } = useQuery({
-    queryKey: ['bt-equity', id],
+    queryKey: btEquityKey,
     queryFn: () => fetchEquityCurve(id),
     enabled: bt?.status === 'completed',
   })
@@ -864,7 +859,7 @@ function BacktestDetail({ id }: { id: number }) {
     isError: ohlcError,
     error: ohlcErrorObj,
   } = useQuery({
-    queryKey: ['bt-ohlc', id, chartSym],
+    queryKey: btOhlcKey,
     queryFn: () => fetchBacktestOhlc(id, { symbol: chartSym }),
     enabled: bt?.status === 'completed' && chartSym.length > 0,
   })
@@ -872,7 +867,7 @@ function BacktestDetail({ id }: { id: number }) {
   const rerunMutation = useMutation({
     mutationFn: (payload: Parameters<typeof triggerBacktest>[0]) => triggerBacktest(payload),
     onSuccess: (data) => {
-      qc.invalidateQueries({ queryKey: ['backtests'] })
+      qc.invalidateQueries({ queryKey: backtestsKey })
       navigate(`/backtests/${data.id}`)
     },
   })
@@ -975,6 +970,40 @@ function BacktestDetail({ id }: { id: number }) {
               }
             />
           </div>
+          {bt.pnl_by_symbol != null && bt.pnl_by_symbol.length > 0 && (
+            <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
+              <h2 className="text-sm font-semibold text-gray-400 mb-3">按标的汇总</h2>
+              <p className="text-xs text-gray-500 mb-3">
+                由成交明细合并：每个标的的已实现总 P&amp;L（<code className="text-gray-400">sum(pnl)</code>）与平仓笔数（明细行数）。
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm max-w-xl">
+                  <thead>
+                    <tr className="text-gray-400 text-xs border-b border-gray-800">
+                      <th className="py-2 pr-4 font-medium text-left">标的</th>
+                      <th className="py-2 pr-4 font-medium text-right">交易次数</th>
+                      <th className="py-2 font-medium text-right">总 P&amp;L</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...bt.pnl_by_symbol].sort((a, b) => b.total_pnl - a.total_pnl).map(row => (
+                      <tr key={row.symbol} className="border-b border-gray-800/60">
+                        <td className="py-2 pr-4 text-gray-200">{row.symbol}</td>
+                        <td className="py-2 pr-4 text-right text-gray-300 tabular-nums">{row.trade_count}</td>
+                        <td
+                          className={`py-2 text-right font-medium tabular-nums ${
+                            row.total_pnl >= 0 ? 'text-green-400' : 'text-red-400'
+                          }`}
+                        >
+                          ${row.total_pnl.toFixed(2)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
           {equity && equity.length > 0 && (
             <div className="bg-gray-900 rounded-xl p-4 border border-gray-800">
               <h2 className="text-sm font-semibold text-gray-400 mb-3">Equity Curve</h2>
@@ -1120,11 +1149,11 @@ function BacktestDetail({ id }: { id: number }) {
                     <td className="px-4 py-2"><SignalBadge direction={t.direction} /></td>
                     <td className="px-4 py-2 text-right text-gray-300">{t.quantity}</td>
                     <td className="px-4 py-2 text-left text-gray-300 whitespace-nowrap tabular-nums">
-                      {formatBacktestDateTime(t.entry_time)}
+                      {formatAppDateOnly(t.entry_time)}
                     </td>
                     <td className="px-4 py-2 text-right text-gray-300 tabular-nums">${t.entry_price.toFixed(2)}</td>
                     <td className="px-4 py-2 text-left text-gray-300 whitespace-nowrap tabular-nums">
-                      {formatBacktestDateTime(t.exit_time)}
+                      {formatAppDateOnly(t.exit_time)}
                     </td>
                     <td className="px-4 py-2 text-right text-gray-300 tabular-nums">
                       {t.exit_price != null ? `$${t.exit_price.toFixed(2)}` : '—'}

@@ -18,6 +18,13 @@ export interface Strategy {
   max_symbols: number
 }
 
+/** One strategy execution batch (all rows share the same signal_time). */
+export interface SignalRun {
+  strategy_id: string
+  signal_time: string
+  signal_count: number
+}
+
 export interface Signal {
   id: number
   strategy_id: string
@@ -57,6 +64,13 @@ export interface ExitPolicy {
 /** Backtest pipeline step; null when idle or after completion. */
 export type BacktestProgressPhase = 'fetching_data' | 'engine' | 'llm_eval'
 
+/** Aggregated from backtest_trades: sum(pnl) and number of trade rows per symbol. */
+export interface BacktestSymbolPnlStat {
+  symbol: string
+  total_pnl: number
+  trade_count: number
+}
+
 export interface Backtest {
   id: number
   strategy_id: string
@@ -85,6 +99,8 @@ export interface Backtest {
   benchmark_total_return: number | null
   /** Strategy total return minus benchmark buy-and-hold */
   alpha_vs_benchmark: number | null
+  /** Present on GET /backtests/:id when status is completed */
+  pnl_by_symbol?: BacktestSymbolPnlStat[] | null
   llm_evaluation: string | null
   llm_model: string | null
   created_at: string

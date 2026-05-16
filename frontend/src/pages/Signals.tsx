@@ -1,8 +1,12 @@
 import { useQuery } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
-import { fetchSignals } from '../api/signals'
+import { fetchSignalRuns, fetchSignals } from '../api/signals'
+import type { SignalRun } from '../types'
+import ExecuteSignalModal from '../components/ExecuteSignalModal'
 import SignalBadge from '../components/SignalBadge'
+import { formatChicagoDateTime } from '../lib/formatTime'
 import type { Signal } from '../types'
+import { useAuthQueryKey } from '../hooks/useAuthQueryKey'
 
 type SortKey =
   | 'direction'
@@ -11,7 +15,7 @@ type SortKey =
   | 'order_type'
   | 'confidence'
   | 'status'
-  | 'created_at'
+  | 'signal_time'
 
 type SortDir = 'asc' | 'desc'
 
@@ -34,8 +38,8 @@ function compareSignals(a: Signal, b: Signal, key: SortKey, dir: SortDir): numbe
     }
     case 'status':
       return mul * str(a.status).localeCompare(str(b.status))
-    case 'created_at':
-      return mul * (new Date(a.created_at).getTime() - new Date(b.created_at).getTime())
+    case 'signal_time':
+      return mul * (new Date(a.signal_time).getTime() - new Date(b.signal_time).getTime())
     default:
       return 0
   }
@@ -75,16 +79,41 @@ function SortableTh({
   )
 }
 
+function runOptionLabel(run: SignalRun): string {
+  return `${formatChicagoDateTime(run.signal_time)} · ${run.strategy_id} (${run.signal_count})`
+}
+
 export default function Signals() {
   const [status, setStatus] = useState('')
-  const [sortKey, setSortKey] = useState<SortKey>('created_at')
-  const [sortDir, setSortDir] = useState<SortDir>('desc')
+  const [selectedRunTime, setSelectedRunTime] = useState('')
+  const [sortKey, setSortKey] = useState<SortKey>('symbol')
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [executeSignal, setExecuteSignal] = useState<Signal | null>(null)
+  const runsKey = useAuthQueryKey('signal-runs')
 
-  const { data: signals, isLoading } = useQuery({
-    queryKey: ['signals', status],
-    queryFn: () => fetchSignals({ status: status || undefined, limit: 100 }),
+  const { data: runs, isLoading: runsLoading } = useQuery({
+    queryKey: runsKey,
+    queryFn: () => fetchSignalRuns({ limit: 100 }),
     refetchInterval: 60_000,
   })
+
+  const activeRunTime = selectedRunTime || runs?.[0]?.signal_time
+  const signalsKey = useAuthQueryKey('signals', status, activeRunTime)
+
+  const { data: signals, isLoading: signalsLoading } = useQuery({
+    queryKey: signalsKey,
+    queryFn: () =>
+      fetchSignals({
+        status: status || undefined,
+        signal_time: activeRunTime,
+        limit: 500,
+      }),
+    enabled: Boolean(activeRunTime),
+    refetchInterval: 60_000,
+  })
+
+  const isLoading = runsLoading || signalsLoading
+  const selectedRun = runs?.find(r => r.signal_time === activeRunTime)
 
   const sortedSignals = useMemo(() => {
     if (!signals?.length) return []
@@ -96,28 +125,49 @@ export default function Signals() {
       setSortDir(d => (d === 'asc' ? 'desc' : 'asc'))
     } else {
       setSortKey(key)
-      setSortDir(key === 'created_at' || key === 'confidence' ? 'desc' : 'asc')
+      setSortDir(key === 'signal_time' || key === 'confidence' ? 'desc' : 'asc')
     }
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <h1 className="text-2xl font-bold">Signals</h1>
-        <select
-          value={status}
-          onChange={e => setStatus(e.target.value)}
-          className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm"
-        >
-          <option value="">All Status</option>
-          <option value="pending">Pending</option>
-          <option value="notified">Notified</option>
-          <option value="executed">Executed</option>
-        </select>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={activeRunTime ?? ''}
+            onChange={e => setSelectedRunTime(e.target.value)}
+            disabled={!runs?.length}
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm max-w-md"
+            aria-label="Strategy run"
+          >
+            {runs?.map(run => (
+              <option key={`${run.strategy_id}-${run.signal_time}`} value={run.signal_time}>
+                {runOptionLabel(run)}
+              </option>
+            ))}
+          </select>
+          <select
+            value={status}
+            onChange={e => setStatus(e.target.value)}
+            className="bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm"
+          >
+            <option value="">All Status</option>
+            <option value="pending">Pending</option>
+            <option value="notified">Notified</option>
+            <option value="executed">Executed</option>
+          </select>
+        </div>
       </div>
-      <p className="text-xs text-gray-500 -mt-4">
+      <p className="text-xs text-gray-500 -mt-2">
         信号供人工或自动下单参考；请根据 Symbol 与 Reasoning 自行判断，未必已成交。Confidence
-        表示突破 band 的强度（非模型概率）。点击表头可排序。
+        表示突破 band 的强度（非模型概率）。时间列为策略产生时刻（America/Chicago）。通过上方下拉选择某次策略运行产生的整批信号。
+        {selectedRun && (
+          <span className="text-gray-400">
+            {' '}
+            当前批次：{selectedRun.signal_count} 条 · {selectedRun.strategy_id}
+          </span>
+        )}
       </p>
       {isLoading && <div className="text-gray-400">Loading...</div>}
       <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
@@ -170,12 +220,13 @@ export default function Signals() {
                   onSort={handleSort}
                 />
                 <SortableTh
-                  label="Time"
-                  column="created_at"
+                  label="Signal time (CT)"
+                  column="signal_time"
                   sortKey={sortKey}
                   sortDir={sortDir}
                   onSort={handleSort}
                 />
+                <th className="px-4 py-3 text-right text-xs text-gray-400 font-medium">Action</th>
               </tr>
             </thead>
             <tbody>
@@ -207,17 +258,35 @@ export default function Signals() {
                     <span className="text-xs text-gray-400">{s.status}</span>
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500 whitespace-nowrap">
-                    {new Date(s.created_at).toLocaleString()}
+                    {formatChicagoDateTime(s.signal_time)}
+                  </td>
+                  <td className="px-4 py-3 text-right whitespace-nowrap">
+                    {(s.status === 'pending' || s.status === 'notified') &&
+                      (s.direction === 'buy' || s.direction === 'sell') && (
+                        <button
+                          type="button"
+                          onClick={() => setExecuteSignal(s)}
+                          className="text-xs px-2 py-1 rounded border border-blue-700 text-blue-400 hover:bg-blue-900/40"
+                        >
+                          {s.direction === 'buy' ? '开仓' : '平仓'}
+                        </button>
+                      )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-        {!isLoading && sortedSignals.length === 0 && (
-          <div className="text-gray-500 text-sm text-center py-8">No signals found.</div>
+        {!isLoading && !runs?.length && (
+          <div className="text-gray-500 text-sm text-center py-8">尚无策略运行产生的信号。</div>
+        )}
+        {!isLoading && runs?.length && sortedSignals.length === 0 && (
+          <div className="text-gray-500 text-sm text-center py-8">该批次下没有符合筛选条件的信号。</div>
         )}
       </div>
+      {executeSignal && (
+        <ExecuteSignalModal signal={executeSignal} onClose={() => setExecuteSignal(null)} />
+      )}
     </div>
   )
 }

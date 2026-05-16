@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
-from src.core.models import Instrument, Option, TradeSignalRecord
+from datetime import datetime
+
+from src.core.app_timezone import api_iso
+from src.core.models import TradeSignalRecord
+
+
+def iso_utc(dt: datetime) -> str:
+    """Serializes timestamps in ISO-8601 using ``settings.timezone`` offset (Chicago by default)."""
+    r = api_iso(dt)
+    return r if r else ""
 
 
 def _instrument_symbol(
@@ -29,7 +38,7 @@ def signal_to_dict(
         "symbol": _instrument_symbol(signal, stock_symbol, option_symbol),
         "stock_id": signal.stock_id,
         "option_id": signal.option_id,
-        "signal_time": signal.signal_time,
+        "signal_time": iso_utc(signal.signal_time),
         "direction": signal.direction,
         "quantity": float(signal.quantity) if signal.quantity else None,
         "order_type": signal.order_type,
@@ -38,7 +47,7 @@ def signal_to_dict(
         "confidence": float(signal.confidence) if signal.confidence else None,
         "reasoning": signal.reasoning,
         "status": signal.status,
-        "created_at": signal.created_at,
+        "created_at": iso_utc(signal.created_at),
     }
 
 

@@ -300,6 +300,8 @@ Compose sets overrides so in-container networking works; your repo `.env` is sti
 
 ### Migrations (Alembic)
 
+The `backend` Compose service bind-mounts `../backend/alembic` read-only, so `docker compose run … alembic` always uses the migration files in your working tree (no image rebuild needed for new revisions alone).
+
 On a **new** Postgres volume the API will not start until tables exist — run this once before first use (or after pulling new migrations):
 
 ```bash

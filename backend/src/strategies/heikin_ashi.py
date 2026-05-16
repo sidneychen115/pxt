@@ -2,8 +2,45 @@
 
 from __future__ import annotations
 
+import json
+import time
+
 import numpy as np
 import pandas as pd
+
+_DEBUG_LOG = "/home/imxichen/projects/pxt/.cursor/debug-e52f46.log"
+_DEBUG_SESSION = "e52f46"
+
+
+def _frame_has_column(frame: pd.DataFrame, name: str) -> bool:
+    """Avoid ``name in frame.columns`` when ``columns`` can be None (TypeError)."""
+    cols = getattr(frame, "columns", None)
+    return cols is not None and name in cols
+
+
+def _agent_log_columns(location: str, daily: pd.DataFrame, *, hypothesis_id: str = "H2") -> None:
+    # #region agent log
+    cols = getattr(daily, "columns", "NO_ATTR")
+    try:
+        payload = {
+            "sessionId": _DEBUG_SESSION,
+            "hypothesisId": hypothesis_id,
+            "location": location,
+            "message": "columns before membership check",
+            "data": {
+                "type": type(daily).__name__,
+                "cols_is_none": cols is None,
+                "cols_type": type(cols).__name__ if cols is not None else None,
+                "empty": bool(getattr(daily, "empty", True)),
+            },
+            "timestamp": int(time.time() * 1000),
+            "runId": "pre-fix",
+        }
+        with open(_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload) + "\n")
+    except OSError:
+        pass
+    # #endregion
 
 
 def heikin_ashi_single_bar(
@@ -32,7 +69,10 @@ def heikin_ashi(ohlc: pd.DataFrame) -> pd.DataFrame:
             columns=["ha_open", "ha_high", "ha_low", "ha_close"]
         ).reindex(ohlc.index)
     need = {"open", "high", "low", "close"}
-    miss = need - set(ohlc.columns)
+    cols = getattr(ohlc, "columns", None)
+    if cols is None:
+        raise ValueError("heikin_ashi: OHLC frame has no columns")
+    miss = need - set(cols)
     if miss:
         raise ValueError(f"heikin_ashi: missing columns {sorted(miss)}")
 
@@ -77,7 +117,8 @@ def resample_to_monthly(daily: pd.DataFrame) -> pd.DataFrame:
     if daily.empty:
         return daily.copy()
     agg = _agg_ohlc()
-    if "volume" in daily.columns:
+    _agent_log_columns("heikin_ashi.py:resample_to_monthly", daily)
+    if _frame_has_column(daily, "volume"):
         agg["volume"] = "sum"
     out = daily.sort_index().resample("ME").agg(agg)
     return out.dropna(subset=["open", "high", "low", "close"], how="any")
@@ -97,7 +138,8 @@ def resample_to_weekly_mon_fri(daily: pd.DataFrame) -> pd.DataFrame:
     if d.empty:
         return d.copy()
     agg = _agg_ohlc()
-    if "volume" in daily.columns:
+    _agent_log_columns("heikin_ashi.py:resample_to_weekly_mon_fri", daily)
+    if _frame_has_column(daily, "volume"):
         agg["volume"] = "sum"
     out = d.resample("W-FRI").agg(agg)
     return out.dropna(subset=["open", "high", "low", "close"], how="any")

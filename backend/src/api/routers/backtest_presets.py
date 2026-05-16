@@ -12,8 +12,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.deps import get_current_user
 from src.core.database import get_session
-from src.core.models import BacktestConfigPreset
+from src.core.models import BacktestConfigPreset, User
 
 router = APIRouter()
 
@@ -73,9 +74,14 @@ def _row_to_out(row: BacktestConfigPreset) -> BacktestPresetOut:
 
 
 @router.get("/", response_model=list[BacktestPresetOut])
-async def list_presets(session: AsyncSession = Depends(get_session)):
+async def list_presets(
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
     result = await session.execute(
-        select(BacktestConfigPreset).order_by(BacktestConfigPreset.created_at.desc())
+        select(BacktestConfigPreset)
+        .where(BacktestConfigPreset.user_id == user.id)
+        .order_by(BacktestConfigPreset.created_at.desc())
     )
     rows = result.scalars().all()
     return [_row_to_out(r) for r in rows]
@@ -84,15 +90,21 @@ async def list_presets(session: AsyncSession = Depends(get_session)):
 @router.post("/", response_model=BacktestPresetOut)
 async def create_preset(
     body: BacktestPresetCreate,
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    cnt = await session.scalar(select(func.count()).select_from(BacktestConfigPreset))
+    cnt = await session.scalar(
+        select(func.count())
+        .select_from(BacktestConfigPreset)
+        .where(BacktestConfigPreset.user_id == user.id)
+    )
     if cnt is not None and cnt >= MAX_PRESETS:
         raise HTTPException(400, f"最多保存 {MAX_PRESETS} 条预设，请先删除旧配置")
 
     sid = (body.strategy_id or "").strip() or None
     row = BacktestConfigPreset(
         id=str(uuid.uuid4()),
+        user_id=user.id,
         name=body.name.strip()[:80],
         strategy_id=sid,
         start_date=body.start_date,
@@ -116,9 +128,15 @@ async def create_preset(
 async def update_preset(
     preset_id: str,
     body: BacktestPresetUpdate,
+    user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
-    result = await session.execute(select(BacktestConfigPreset).where(BacktestConfigPreset.id == preset_id))
+    result = await session.execute(
+        select(BacktestConfigPreset).where(
+            BacktestConfigPreset.id == preset_id,
+            BacktestConfigPreset.user_id == user.id,
+        )
+    )
     row = result.scalar_one_or_none()
     if not row:
         raise HTTPException(404, "预设不存在")
@@ -155,8 +173,17 @@ async def update_preset(
 
 
 @router.delete("/{preset_id}")
-async def delete_preset(preset_id: str, session: AsyncSession = Depends(get_session)):
-    result = await session.execute(delete(BacktestConfigPreset).where(BacktestConfigPreset.id == preset_id))
+async def delete_preset(
+    preset_id: str,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        delete(BacktestConfigPreset).where(
+            BacktestConfigPreset.id == preset_id,
+            BacktestConfigPreset.user_id == user.id,
+        )
+    )
     await session.commit()
     if result.rowcount == 0:
         raise HTTPException(404, "预设不存在")

@@ -1,15 +1,67 @@
 import { useEffect, useRef } from 'react'
 import { ColorType, createChart } from 'lightweight-charts'
 import type { CandlestickData, SeriesMarker, Time, UTCTimestamp } from 'lightweight-charts'
+import { formatAppChartDay } from '../lib/formatTime'
 import type { BacktestOhlcResponse, BacktestTrade } from '../types'
 
 const DAILY_LIKE = new Set(['1d', '1wk', '1mo'])
+
+/** Lightweight Charts rejects unsorted candles (strict increasing) / markers (non-decreasing). */
+function prepareCandles(ohlc: BacktestOhlcResponse): CandlestickData[] {
+  const tf = ohlc.timeframe
+  const raw: CandlestickData[] = ohlc.bars.map(b => ({
+    time: b.time as Time,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+  }))
+  if (raw.length === 0) return raw
+  if (DAILY_LIKE.has(tf)) {
+    const byDay = new Map<string, CandlestickData>()
+    for (const c of raw) {
+      byDay.set(String(c.time), c)
+    }
+    return Array.from(byDay.keys())
+      .sort((a, b) => a.localeCompare(b))
+      .map(k => byDay.get(k)!)
+  }
+  raw.sort((a, b) => Number(a.time) - Number(b.time))
+  const out: CandlestickData[] = []
+  for (const c of raw) {
+    const t = Number(c.time)
+    const last = out[out.length - 1]
+    if (last != null && Number(last.time) === t) {
+      out[out.length - 1] = c
+      continue
+    }
+    out.push(c)
+  }
+  return out
+}
+
+function cmpChartTime(a: Time, b: Time): number {
+  if (typeof a === 'string' && typeof b === 'string') {
+    return a < b ? -1 : a > b ? 1 : 0
+  }
+  return Number(a) - Number(b)
+}
+
+/** SeriesMarker must be ascending by `time`; equal times allowed */
+function sortedMarkers(markers: SeriesMarker<Time>[]): SeriesMarker<Time>[] {
+  return [...markers].sort((x, y) => {
+    const c = cmpChartTime(x.time, y.time)
+    if (c !== 0) return c
+    if (x.position === y.position) return 0
+    return x.position === 'belowBar' ? -1 : 1
+  })
+}
 
 function tradeEventToChartTime(iso: string, timeframe: string): Time | null {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return null
   if (DAILY_LIKE.has(timeframe)) {
-    return d.toISOString().slice(0, 10) as Time
+    return formatAppChartDay(iso) as Time
   }
   return Math.floor(d.getTime() / 1000) as UTCTimestamp
 }
@@ -82,16 +134,14 @@ export default function BacktestCandlestickChart({ ohlc, trades, focusTradeId = 
       wickDownColor: '#ef4444',
     })
 
-    const candleData: CandlestickData[] = ohlc.bars.map(b => ({
-      time: b.time as Time,
-      open: b.open,
-      high: b.high,
-      low: b.low,
-      close: b.close,
-    }))
+    const candleData = prepareCandles(ohlc)
 
     if (candleData.length > 0) {
-      series.setData(candleData)
+      try {
+        series.setData(candleData)
+      } catch (e) {
+        console.warn('BacktestCandlestickChart: setData failed', e)
+      }
     }
 
     // Markers only render when their `time` matches a bar in the series (server downsampling keeps trade bars).
@@ -122,7 +172,11 @@ export default function BacktestCandlestickChart({ ohlc, trades, focusTradeId = 
         }
       }
     }
-    series.setMarkers(markers)
+    try {
+      series.setMarkers(sortedMarkers(markers))
+    } catch (e) {
+      console.warn('BacktestCandlestickChart: setMarkers failed', e)
+    }
 
     if (candleData.length > 0) {
       const trade = focusTradeId != null ? trades.find(tr => tr.id === focusTradeId) : undefined

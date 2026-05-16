@@ -22,8 +22,71 @@ class Instrument(Base):
     exchange: Mapped[str | None] = mapped_column(String(20))
     currency: Mapped[str] = mapped_column(String(10), default="USD")
     name: Mapped[str | None] = mapped_column(String(100))
+    sec_cik: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     bars: Mapped[list["OhlcvBar"]] = relationship(back_populates="instrument")
+
+
+class HaOhlcBar(Base):
+    """Heikin-Ashi OHLC for aggregated periods (calendar month/week; daily finalized optional).
+
+    Partial in-progress periods use ``is_final=False`` with stable ``ha_open``; finalized rows use
+    ``is_final=True``. ``bar_time`` is period end (UTC).
+    """
+
+    __tablename__ = "ha_ohlc_bars"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    instrument_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("instruments.id", ondelete="CASCADE"), nullable=False
+    )
+    timeframe: Mapped[str] = mapped_column(String(6), nullable=False)
+    bar_time: Mapped[datetime] = mapped_column(TIMESTAMPTZ, nullable=False)
+    ha_open: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    ha_high: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    ha_low: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    ha_close: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    is_final: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="computed")
+    computed_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "instrument_id",
+            "timeframe",
+            "bar_time",
+            name="uq_ha_ohlc_instrument_tf_bar_time",
+        ),
+        Index("idx_ha_ohlc_lookup", "instrument_id", "timeframe", "bar_time"),
+        Index("idx_ha_ohlc_partial", "instrument_id", "timeframe", "is_final"),
+    )
+
+
+class FundamentalRevenueQuarterly(Base):
+    """SEC XBRL Revenue (``us-gaap:Revenues``) facts with optional YoY."""
+
+    __tablename__ = "fundamental_revenue_quarterly"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    instrument_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("instruments.id", ondelete="CASCADE"), nullable=False
+    )
+    accession: Mapped[str] = mapped_column(String(32), nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, nullable=False)
+    filing_date: Mapped[date] = mapped_column(Date, nullable=False)
+    report_form: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    fiscal_period: Mapped[str | None] = mapped_column(String(8), nullable=True)
+    calendar_frame: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    revenue_usd: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revenue_yoy: Mapped[Decimal | None] = mapped_column(Numeric(16, 8), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "accession", name="uq_fund_rev_inst_accn"),
+        Index("idx_fund_rev_inst_filed", "instrument_id", "filing_date"),
+        Index("idx_fund_rev_inst_frame", "instrument_id", "calendar_frame"),
+    )
 
 
 class Option(Base):
@@ -142,6 +205,68 @@ class OptionChainSnapshot(Base):
     )
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    username: Mapped[str] = mapped_column(String(50), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
+
+
+class UserStrategy(Base):
+    __tablename__ = "user_strategies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    strategy_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("strategies.id", ondelete="CASCADE"), nullable=False
+    )
+    symbols: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
+    timeframes: Mapped[list[str]] = mapped_column(ARRAY(String), nullable=False)
+    run_frequency: Mapped[str] = mapped_column(String(50), nullable=False)
+    parameters: Mapped[dict] = mapped_column(JSONB, default=dict)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    max_symbols: Mapped[int] = mapped_column(Integer, default=50)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint("user_id", "strategy_id", name="uq_user_strategy"),)
+
+
+class UserPosition(Base):
+    __tablename__ = "user_positions"
+
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    instrument_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("instruments.id", ondelete="CASCADE"), primary_key=True
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(16, 4), nullable=False, default=0)
+    avg_cost: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
+
+
+class PositionFill(Base):
+    __tablename__ = "position_fills"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    instrument_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("instruments.id"), nullable=False
+    )
+    signal_id: Mapped[int | None] = mapped_column(
+        BigInteger, ForeignKey("trade_signals.id", ondelete="SET NULL")
+    )
+    side: Mapped[str] = mapped_column(String(4), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(16, 4), nullable=False)
+    fill_price: Mapped[Decimal] = mapped_column(Numeric(16, 6), nullable=False)
+    filled_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
+
+
 class Strategy(Base):
     __tablename__ = "strategies"
 
@@ -161,6 +286,7 @@ class TradeSignalRecord(Base):
     __tablename__ = "trade_signals"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     strategy_id: Mapped[str] = mapped_column(String(50), ForeignKey("strategies.id"), nullable=False)
     stock_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("instruments.id"))
     option_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("options.id"))
@@ -184,6 +310,7 @@ class TradeSignalRecord(Base):
         ),
         Index("idx_signals_strategy", "strategy_id", "created_at"),
         Index("idx_signals_status", "status", "created_at"),
+        Index("idx_signals_user", "user_id", "created_at"),
     )
 
 
@@ -191,6 +318,7 @@ class Backtest(Base):
     __tablename__ = "backtests"
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     strategy_id: Mapped[str] = mapped_column(String(50), ForeignKey("strategies.id"), nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
@@ -273,6 +401,7 @@ class BacktestConfigPreset(Base):
     __tablename__ = "backtest_presets"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(80), nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, default=datetime.utcnow)
     strategy_id: Mapped[str | None] = mapped_column(String(50), ForeignKey("strategies.id"), nullable=True)

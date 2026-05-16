@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 from sqlalchemy import select
-from src.core.models import Instrument, Strategy, TradeSignalRecord
+from src.core.models import Instrument, Strategy, TradeSignalRecord, User
 from src.signals.processor import SignalProcessor
 
 
@@ -36,6 +36,13 @@ def _make_strategy(session):
     return s
 
 
+async def _test_user(session) -> int:
+    u = User(username="sig_proc_user")
+    session.add(u)
+    await session.flush()
+    return u.id
+
+
 async def test_process_pending_sends_notification(session):
     """process_pending() returns 1 and sets status='notified' when send() succeeds."""
     _make_strategy(session)
@@ -43,7 +50,9 @@ async def test_process_pending_sends_notification(session):
     session.add(inst)
     await session.flush()
 
+    uid = await _test_user(session)
     signal = TradeSignalRecord(
+        user_id=uid,
         strategy_id="test_strat",
         stock_id=inst.id,
         signal_time=datetime.now(timezone.utc),
@@ -80,7 +89,9 @@ async def test_process_pending_keeps_pending_on_failure(session):
     session.add(inst)
     await session.flush()
 
+    uid = await _test_user(session)
     signal = TradeSignalRecord(
+        user_id=uid,
         strategy_id="test_strat",
         stock_id=inst.id,
         signal_time=datetime.now(timezone.utc),
@@ -116,7 +127,9 @@ async def test_get_symbol_stock(session):
     session.add(inst)
     await session.flush()
 
+    uid = await _test_user(session)
     signal = TradeSignalRecord(
+        user_id=uid,
         strategy_id="test_strat",
         stock_id=inst.id,
         signal_time=datetime.now(timezone.utc),

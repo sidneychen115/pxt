@@ -1,6 +1,7 @@
 import pytest
 import pandas as pd
-from datetime import datetime, timezone
+from datetime import date
+from src.core.app_timezone import daily_bar_timestamp_for_session_date
 from src.data.repository import upsert_instrument, save_bars, get_bars
 
 
@@ -14,7 +15,10 @@ async def test_save_and_get_bars(session):
         "volume": [1000, 2000],
         "vwap": [None, None],
         "source": ["yfinance", "yfinance"],
-    }, index=pd.to_datetime(["2024-01-02", "2024-01-03"], utc=True))
+    }, index=pd.DatetimeIndex([
+        pd.Timestamp(daily_bar_timestamp_for_session_date(date(2024, 1, 2))),
+        pd.Timestamp(daily_bar_timestamp_for_session_date(date(2024, 1, 3))),
+    ]))
     count = await save_bars(session, inst.id, "1d", df)
     assert count == 2
     result = await get_bars(session, inst.id, "1d", limit=10)
@@ -27,7 +31,9 @@ async def test_save_bars_deduplication(session):
     df = pd.DataFrame({
         "open": [200.0], "high": [201.0], "low": [199.0], "close": [200.5],
         "volume": [500], "vwap": [None], "source": ["yfinance"],
-    }, index=pd.to_datetime(["2024-01-04"], utc=True))
+    }, index=pd.DatetimeIndex([
+        pd.Timestamp(daily_bar_timestamp_for_session_date(date(2024, 1, 4))),
+    ]))
     await save_bars(session, inst.id, "1d", df)
     count2 = await save_bars(session, inst.id, "1d", df)  # same data again
     assert count2 == 0  # ON CONFLICT DO NOTHING

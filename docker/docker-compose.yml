@@ -31,6 +31,9 @@ services:
       - "8000:8000"
     volumes:
       - ../schwab_token.json:/app/schwab_token.json:ro
+      # Alembic revisions live on the host — `compose run backend alembic` (e.g. pxt-rebuild -d)
+      # must see new files without rebuilding the image after every migration.
+      - ../backend/alembic:/app/alembic:ro
     depends_on:
       postgres:
         condition: service_healthy

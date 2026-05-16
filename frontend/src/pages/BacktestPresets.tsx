@@ -21,6 +21,7 @@ import {
   snapshotFromCurrentForm,
   type BacktestPreset,
 } from '../lib/backtestPresets'
+import { useAuthQueryKey } from '../hooks/useAuthQueryKey'
 
 const defaultForm = (): BacktestFormFields => ({
   strategy_id: '',
@@ -32,9 +33,10 @@ const defaultForm = (): BacktestFormFields => ({
 
 export default function BacktestPresets() {
   const qc = useQueryClient()
+  const presetsKey = useAuthQueryKey('backtest-presets')
   const { data: strategies } = useQuery({ queryKey: ['strategies'], queryFn: fetchStrategies })
   const { data: presetDtos, isLoading: presetsLoading } = useQuery({
-    queryKey: ['backtest-presets'],
+    queryKey: presetsKey,
     queryFn: fetchBacktestPresets,
   })
   const presets = useMemo(() => (presetDtos ?? []).map(dtoToPreset), [presetDtos])
@@ -60,14 +62,14 @@ export default function BacktestPresets() {
       return createBacktestPreset(body)
     },
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['backtest-presets'] })
+      qc.invalidateQueries({ queryKey: presetsKey })
       closeModal()
     },
   })
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => removeBacktestPreset(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['backtest-presets'] }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: presetsKey }),
   })
 
   const openNew = () => {

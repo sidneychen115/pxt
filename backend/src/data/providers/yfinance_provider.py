@@ -3,7 +3,11 @@ from datetime import date, datetime, timezone
 from functools import partial
 import pandas as pd
 import yfinance as yf
+from src.core.app_timezone import daily_bar_timestamp_for_session_date, session_date_from_utc_naive_daily_label
 from src.data.providers.base import DataProvider, YFINANCE_INTERVALS
+
+# Bars from Yahoo keyed by calendar day / week-end / month-end — stored at Chicago session midnight.
+_DAILY_LIKE_TF = frozenset({"1d", "1wk", "1mo"})
 
 
 class YFinanceProvider(DataProvider):
@@ -43,6 +47,13 @@ class YFinanceProvider(DataProvider):
         df["vwap"] = None
         df["source"] = "yfinance"
         df.index = pd.to_datetime(df.index, utc=True)
+        if timeframe in _DAILY_LIKE_TF:
+            sess_dates = [
+                session_date_from_utc_naive_daily_label(ts.to_pydatetime()) for ts in df.index
+            ]
+            df.index = pd.DatetimeIndex(
+                [pd.Timestamp(daily_bar_timestamp_for_session_date(sd)) for sd in sess_dates]
+            )
         return df.dropna(subset=["open", "close"])
 
     async def get_option_chain(

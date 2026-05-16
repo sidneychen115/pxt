@@ -51,13 +51,19 @@ class StrategyRunLogger:
         )
 
     async def _emit(self, level: str, message: str, *, phase: str, **extra) -> None:
-        details = {**self._base_details(), "phase": phase, **extra}
+        details = {
+            **self._base_details(),
+            "phase": phase,
+            "started_at": self._started_at.isoformat(),
+            **extra,
+        }
         self._session.add(
             SystemEvent(
                 event_type=_EVENT_TYPE,
                 level=level,
                 message=message,
                 details=details,
+                created_at=datetime.now(timezone.utc),
             )
         )
         await self._session.commit()

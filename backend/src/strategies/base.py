@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import ClassVar, Literal
 import pandas as pd
 
@@ -14,11 +14,13 @@ class PortfolioSnapshot:
     ``equity`` is mark-to-market account value (cash + open positions) when the backtest
     engine supplies it; use for volatility-based sizing. If None, strategies may fall back
     to ``cash``.
+    ``positions``: long qty by symbol when live/book positions are modeled (strategy-specific).
     """
 
     cash: float | None = None
     initial_capital: float | None = None
     equity: float | None = None
+    positions: dict[str, float] | None = None
 
 
 @dataclass
@@ -58,6 +60,13 @@ class DataContext(ABC):
     @abstractmethod
     async def get_latest_quote(self, symbol: str) -> dict:
         """Return latest quote dict."""
+
+    async def decision_time(self) -> datetime:
+        """Moment for fundamentals point-in-time and pricing (live wall clock).
+
+        Backtests override with the simulated bar timestamp.
+        """
+        return datetime.now(timezone.utc)
 
     async def log_step(self, message: str, *, level: str = "info", **details) -> None:
         """Optional live-run diagnostics; no-op unless a run logger is attached."""

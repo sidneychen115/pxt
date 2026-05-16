@@ -7,6 +7,8 @@ def test_discover_finds_ma_crossover():
     assert "ma_crossover" in REGISTRY
     assert "adaptive_turtle" in REGISTRY
     assert "ha_month_week_band" in REGISTRY
+    assert "ha_month_day_revenue_slots" in REGISTRY
+    assert "ha_month_day_ma7_slots" in REGISTRY
 
 
 def test_get_strategy_returns_instance():

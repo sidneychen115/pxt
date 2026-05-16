@@ -1,5 +1,7 @@
 /** Cron / interval scheduling for live strategies (America/Chicago). */
 
+import { humanizeCronExpression } from './cronHumanize'
+
 export type ScheduleMode = 'interval' | 'cron'
 
 const CRON_RE = /^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$/
@@ -43,11 +45,30 @@ export function timeframesForCronSave(strategyId: string, existing: string[]): s
   return ['1d']
 }
 
-/** Human-readable live schedule line for Strategies list. */
-export function describeLiveSchedule(
+/** Short interval phrase without the leading “启用后”. */
+export function describeIntervalSync(
+  runIntervalMinutes: number | undefined,
+  timeframes: string[],
+  timeframeLabel: (tf: string) => string,
+  minIntervalFromTfs: (tfs: string[]) => number,
+  anchorFromTfs: (tfs: string[]) => string,
+): string {
+  const mins = runIntervalMinutes ?? minIntervalFromTfs(timeframes)
+  const anchor = anchorFromTfs(timeframes)
+  if (mins < 1440) {
+    return `约每 ${mins} 分钟同步数据并跑策略（最短周期 ${timeframeLabel(anchor)}）`
+  }
+  if (mins === 1440) {
+    return `约每 24 小时同步并跑策略（最短周期 ${timeframeLabel(anchor)}）`
+  }
+  const days = Math.max(1, Math.round(mins / 1440))
+  return `约每 ${days} 日同步并跑策略（最短周期 ${timeframeLabel(anchor)}）`
+}
+
+/** Prominent one-line schedule for strategy cards (white text). */
+export function formatScheduleHighlight(
   runFrequency: string,
   runIntervalMinutes: number | undefined,
-  runAnchorTimeframe: string | undefined,
   timeframes: string[],
   timeframeLabel: (tf: string) => string,
   minIntervalFromTfs: (tfs: string[]) => number,
@@ -56,23 +77,44 @@ export function describeLiveSchedule(
 ): string {
   const freq = (runFrequency || '').trim()
   if (isValidCronExpression(freq)) {
+    const human = humanizeCronExpression(freq) ?? freq
     const haNote =
-      strategyId === 'ha_month_week_band'
-        ? '；到点用市价作日线 close 算信号（不落库）'
-        : ''
-    return `启用后按 Cron（America/Chicago）：${freq}${haNote}`
+      strategyId === 'ha_month_week_band' ? '；到点用市价作日线 close 算信号' : ''
+    return `定时运行：${human}${haNote}`
   }
-  const mins = runIntervalMinutes ?? minIntervalFromTfs(timeframes)
-  const anchor = runAnchorTimeframe ?? anchorFromTfs(timeframes)
-  if (mins < 60) {
-    return `启用后约每 ${mins} 分钟同步数据并跑策略（最短周期 ${timeframeLabel(anchor)}）`
+  const tfText = timeframes.length ? timeframes.map(tf => timeframeLabel(tf)).join('、') : '—'
+  const interval = describeIntervalSync(
+    runIntervalMinutes,
+    timeframes,
+    timeframeLabel,
+    minIntervalFromTfs,
+    anchorFromTfs,
+  )
+  return `跟踪周期：${tfText} · ${interval}`
+}
+
+/** Secondary schedule line (e.g. edit modal hints): prefixed with 启用后. */
+export function describeLiveSchedule(
+  runFrequency: string,
+  runIntervalMinutes: number | undefined,
+  _runAnchorTimeframe: string | undefined,
+  timeframes: string[],
+  timeframeLabel: (tf: string) => string,
+  minIntervalFromTfs: (tfs: string[]) => number,
+  anchorFromTfs: (tfs: string[]) => string,
+  strategyId?: string,
+): string {
+  const line = formatScheduleHighlight(
+    runFrequency,
+    runIntervalMinutes,
+    timeframes,
+    timeframeLabel,
+    minIntervalFromTfs,
+    anchorFromTfs,
+    strategyId,
+  )
+  if (isValidCronExpression((runFrequency || '').trim()) && strategyId === 'ha_month_week_band') {
+    return `启用后${line}（不落库）`
   }
-  if (mins < 1440) {
-    return `启用后约每 ${mins} 分钟同步数据并跑策略（最短周期 ${timeframeLabel(anchor)}）`
-  }
-  if (mins === 1440) {
-    return `启用后约每 24 小时同步并跑策略（最短周期 ${timeframeLabel(anchor)}）`
-  }
-  const days = Math.max(1, Math.round(mins / 1440))
-  return `启用后约每 ${days} 日同步并跑策略（最短周期 ${timeframeLabel(anchor)}）`
+  return `启用后${line}`
 }

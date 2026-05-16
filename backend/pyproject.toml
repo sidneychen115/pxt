@@ -12,6 +12,7 @@ dependencies = [
     "apscheduler>=3.10,<4.0",
     "pandas-ta>=0.3",
     "pandas>=2.2",
+    "python-dateutil>=2.9",
     "numpy>=1.26",
     "yfinance>=0.2",
     "schwab-py>=1.4",
