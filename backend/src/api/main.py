@@ -5,6 +5,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.backtest_stale_reaper import run_backtest_stale_reaper
+from src.core.leader_lock import api_background_leader
 from src.api.routers import (
     auth,
     strategies,
@@ -24,17 +25,24 @@ _scheduler: StrategyScheduler | None = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _scheduler
-    _scheduler = StrategyScheduler()
-    await _scheduler.start()
-    app.state.scheduler = _scheduler
-    stale_task = asyncio.create_task(run_backtest_stale_reaper())
-    try:
-        yield
-    finally:
-        stale_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await stale_task
-        await _scheduler.stop()
+    stale_task: asyncio.Task | None = None
+    async with api_background_leader() as is_leader:
+        if is_leader:
+            _scheduler = StrategyScheduler()
+            await _scheduler.start()
+            app.state.scheduler = _scheduler
+            stale_task = asyncio.create_task(run_backtest_stale_reaper())
+        else:
+            app.state.scheduler = None
+        try:
+            yield
+        finally:
+            if stale_task is not None:
+                stale_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await stale_task
+            if is_leader and _scheduler is not None:
+                await _scheduler.stop()
 
 
 app = FastAPI(title="PXT Trading System", lifespan=lifespan)

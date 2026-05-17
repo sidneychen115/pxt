@@ -11,7 +11,6 @@ import { fetchStrategies } from '../api/strategies'
 import BacktestConfigForm, { type BacktestFormFields } from '../components/BacktestConfigForm'
 import {
   EMPTY_EXIT_FORM,
-  parseParametersJson,
   type ExitFormState,
 } from '../lib/backtestFormConfig'
 import {
@@ -21,10 +20,17 @@ import {
   snapshotFromCurrentForm,
   type BacktestPreset,
 } from '../lib/backtestPresets'
+import { DEFAULT_BACKTEST_TIMEFRAME } from '../lib/backtestTimeframe'
+import {
+  DEFAULT_BACKTEST_POSITION_PCT,
+  mergeBacktestRunParameters,
+} from '../lib/backtestPositionSizing'
 import { useAuthQueryKey } from '../hooks/useAuthQueryKey'
 
 const defaultForm = (): BacktestFormFields => ({
   strategy_id: '',
+  timeframe: DEFAULT_BACKTEST_TIMEFRAME,
+  position_pct_percent: DEFAULT_BACKTEST_POSITION_PCT * 100,
   start_date: '2023-01-01',
   end_date: '2024-01-01',
   symbols: '',
@@ -51,7 +57,7 @@ export default function BacktestPresets() {
 
   const saveMutation = useMutation({
     mutationFn: async () => {
-      parseParametersJson(parametersJson)
+      mergeBacktestRunParameters(parametersJson, form.timeframe, form.position_pct_percent)
       const name = presetName.trim()
       if (!name) throw new Error('请填写预设名称')
       const snap = snapshotFromCurrentForm(form, exitPolicy, parametersJson)
@@ -88,6 +94,8 @@ export default function BacktestPresets() {
     const snap = applyPreset(p)
     setForm({
       strategy_id: snap.strategy_id,
+      timeframe: snap.timeframe,
+      position_pct_percent: snap.position_pct_percent,
       start_date: snap.start_date,
       end_date: snap.end_date,
       symbols: snap.symbols,

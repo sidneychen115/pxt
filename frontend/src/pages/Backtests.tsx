@@ -13,11 +13,11 @@ import BacktestCandlestickChart from '../components/BacktestCandlestickChart'
 import SignalBadge from '../components/SignalBadge'
 import BacktestConfigForm from '../components/BacktestConfigForm'
 import type { Backtest, BacktestProgressPhase, BacktestTrade } from '../types'
+import { isBacktestInProgress } from '../lib/backtestStatus'
 import {
   EMPTY_EXIT_FORM,
   exitPolicyFromForm,
   exitPolicyToForm,
-  parseParametersJson,
   buildRerunPayload,
   sliceIsoDate,
   type ExitFormState,
@@ -30,7 +30,18 @@ import {
   snapshotFromCurrentForm,
 } from '../lib/backtestPresets'
 import { useAuthQueryKey } from '../hooks/useAuthQueryKey'
-import { formatAppDateOnly, formatAppDateTime } from '../lib/formatTime'
+import { formatAppDateOnly, formatAppDateTime, formatDurationSeconds } from '../lib/formatTime'
+import {
+  DEFAULT_BACKTEST_TIMEFRAME,
+  extractBacktestTimeframe,
+  stringifyBacktestParametersJson,
+} from '../lib/backtestTimeframe'
+import {
+  DEFAULT_BACKTEST_POSITION_PCT,
+  extractPositionPctPercent,
+  mergeBacktestRunParameters,
+} from '../lib/backtestPositionSizing'
+import { timeframeLabel } from '../lib/strategyTimeframes'
 
 function formatIsoDateShort(iso: string | null | undefined): string {
   if (iso == null || iso === '') return '—'
@@ -62,6 +73,7 @@ type BacktestSortKey =
   | 'total_trades'
   | 'avg_hold_days'
   | 'created_at'
+  | 'duration_seconds'
   | 'start_date'
   | 'end_date'
   | 'status'
@@ -118,7 +130,13 @@ const PROGRESS_STEPS: { phase: BacktestProgressPhase; label: string }[] = [
   { phase: 'llm_eval', label: 'LLM 评估' },
 ]
 
-const PHASE_ORDER: BacktestProgressPhase[] = ['fetching_data', 'engine', 'llm_eval']
+const PHASE_ORDER: BacktestProgressPhase[] = [
+  'queued',
+  'worker',
+  'fetching_data',
+  'engine',
+  'llm_eval',
+]
 
 function phaseRank(p: BacktestProgressPhase | null | undefined): number {
   if (p == null) return -1
@@ -141,7 +159,7 @@ function formatRelativeUpdate(iso: string | null | undefined): string {
 /** Stale HTTP poll must not overwrite newer WebSocket progress while status is running. */
 function mergeRunningBacktestProgress(prev: Backtest | undefined, next: Backtest): Backtest {
   if (!prev || prev.id !== next.id) return next
-  if (prev.status !== 'running' || next.status !== 'running') return next
+  if (!isBacktestInProgress(prev.status) || !isBacktestInProgress(next.status)) return next
   const pr = phaseRank(prev.progress_phase)
   const nr = phaseRank(next.progress_phase)
   const prevTs = prev.progress_updated_at ? Date.parse(prev.progress_updated_at) : 0
@@ -216,9 +234,9 @@ function BacktestProgressPanel({ bt }: { bt: Backtest }) {
         })}
       </div>
       <div className="text-sm text-gray-300 min-h-[1.25rem]">
-        {bt.progress_message ?? (bt.status === 'running' ? '正在启动…' : '')}
+        {bt.progress_message ?? (isBacktestInProgress(bt.status) ? '正在启动…' : '')}
       </div>
-      {bt.status === 'running' && (
+      {isBacktestInProgress(bt.status) && (
         <div className="text-xs text-gray-500">
           {relativeFreshness || '等待首次进度上报…'}
           <span className="text-gray-600"> · </span>
@@ -268,6 +286,8 @@ function BacktestList() {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({
     strategy_id: '',
+    timeframe: DEFAULT_BACKTEST_TIMEFRAME,
+    position_pct_percent: DEFAULT_BACKTEST_POSITION_PCT * 100,
     start_date: '2023-01-01',
     end_date: '2024-01-01',
     symbols: '',
@@ -317,6 +337,8 @@ function BacktestList() {
           return sortableNumber(bt.avg_hold_days)
         case 'created_at':
           return new Date(bt.created_at).getTime()
+        case 'duration_seconds':
+          return sortableNumber(bt.duration_seconds)
         case 'start_date':
           return new Date(bt.start_date).getTime()
         case 'end_date':
@@ -364,15 +386,18 @@ function BacktestList() {
   useEffect(() => {
     const raw = (location.state as { prefillFromBacktest?: Backtest } | null)?.prefillFromBacktest
     if (!raw) return
+    const params = raw.parameters ?? {}
     setForm({
       strategy_id: raw.strategy_id,
+      timeframe: extractBacktestTimeframe(params),
+      position_pct_percent: extractPositionPctPercent(params),
       start_date: sliceIsoDate(raw.start_date),
       end_date: sliceIsoDate(raw.end_date),
       symbols: raw.symbols.join(', '),
       initial_capital: raw.initial_capital,
     })
     setExitPolicy(exitPolicyToForm(raw.exit_policy))
-    setParametersJson(JSON.stringify(raw.parameters ?? {}, null, 2))
+    setParametersJson(stringifyBacktestParametersJson(params))
     setShowForm(true)
     navigate('/backtests', { replace: true, state: {} })
   }, [location.state, navigate])
@@ -394,7 +419,11 @@ function BacktestList() {
     mutationFn: () => {
       let parameters: Record<string, unknown>
       try {
-        parameters = parseParametersJson(parametersJson)
+        parameters = mergeBacktestRunParameters(
+          parametersJson,
+          form.timeframe,
+          form.position_pct_percent,
+        )
       } catch (e) {
         const msg =
           e instanceof SyntaxError
@@ -427,6 +456,8 @@ function BacktestList() {
     const snap = applyPreset(p)
     setForm({
       strategy_id: snap.strategy_id,
+      timeframe: snap.timeframe,
+      position_pct_percent: snap.position_pct_percent,
       start_date: snap.start_date,
       end_date: snap.end_date,
       symbols: snap.symbols,
@@ -586,6 +617,7 @@ function BacktestList() {
                 ['total_trades', '交易数'],
                 ['avg_hold_days', '均持仓'],
                 ['created_at', '创建时间'],
+                ['duration_seconds', '耗时'],
                 ['start_date', '区间起'],
                 ['end_date', '区间止'],
                 ['status', '状态'],
@@ -612,7 +644,7 @@ function BacktestList() {
           <tbody>
             {backtests?.length === 0 && (
               <tr>
-                <td colSpan={16} className="px-3 py-8 text-center text-gray-500">
+                <td colSpan={17} className="px-3 py-8 text-center text-gray-500">
                   暂无回测记录。点击「New Backtest」开始。
                 </td>
               </tr>
@@ -670,6 +702,12 @@ function BacktestList() {
                   </td>
                   <td className="px-3 py-2 text-gray-300 whitespace-nowrap">{fmtNum(bt.avg_hold_days, 1)}</td>
                   <td className="px-3 py-2 text-gray-400 text-xs whitespace-nowrap">{formatAppDateTime(bt.created_at)}</td>
+                  <td className="px-3 py-2 text-gray-300 whitespace-nowrap tabular-nums">
+                    {formatDurationSeconds(bt.duration_seconds)}
+                    {isBacktestInProgress(bt.status) && bt.duration_seconds != null && (
+                      <span className="text-gray-500 text-[10px] ml-1">进行中</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-gray-400 whitespace-nowrap">{formatIsoDateShort(bt.start_date)}</td>
                   <td className="px-3 py-2 text-gray-400 whitespace-nowrap">{formatIsoDateShort(bt.end_date)}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
@@ -712,11 +750,11 @@ function BacktestDetail({ id }: { id: number }) {
       const next = await fetchBacktest(id)
       return mergeRunningBacktestProgress(qc.getQueryData<Backtest>(backtestKey), next)
     },
-    refetchInterval: (q) => (q.state.data?.status === 'running' ? 2500 : false),
+    refetchInterval: (q) => (isBacktestInProgress(q.state.data?.status) ? 2500 : false),
   })
 
   useEffect(() => {
-    if (bt?.status !== 'running') return
+    if (!isBacktestInProgress(bt?.status)) return
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${proto}//${window.location.host}/ws`)
     ws.onmessage = (ev) => {
@@ -883,6 +921,9 @@ function BacktestDetail({ id }: { id: number }) {
         <div className="flex flex-wrap items-center gap-3">
           <button onClick={() => navigate('/backtests')} className="text-gray-400 hover:text-gray-200">← Back</button>
           <h1 className="text-2xl font-bold">{bt.strategy_id}</h1>
+          <span className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700 text-gray-300">
+            {timeframeLabel(extractBacktestTimeframe(bt.parameters ?? {}))}
+          </span>
           <span className={`text-xs px-2 py-1 rounded font-semibold ${
             bt.status === 'completed' ? 'bg-green-900 text-green-300' :
             bt.status === 'failed' ? 'bg-red-900 text-red-300' :
@@ -916,7 +957,7 @@ function BacktestDetail({ id }: { id: number }) {
           {rerunMutation.error instanceof Error ? rerunMutation.error.message : '重新测试失败'}
         </p>
       )}
-      {bt.status === 'running' && <BacktestProgressPanel bt={bt} />}
+      {isBacktestInProgress(bt.status) && <BacktestProgressPanel bt={bt} />}
       {bt.status === 'failed' && bt.error_message && (
         <div className="rounded-xl border border-red-800/60 bg-red-950/30 px-4 py-3 text-sm text-red-200">
           <p className="font-semibold text-red-300 mb-1">失败原因</p>

@@ -1,0 +1,36 @@
+# Install once: pre-commit install
+# Run manually: pre-commit run --all-files
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        name: ruff check (backend)
+        args: [--fix, --exit-non-zero-on-fix]
+        files: ^backend/
+      - id: ruff-format
+        name: ruff format (backend)
+        files: ^backend/
+
+  - repo: local
+    hooks:
+      - id: backend-compileall
+        name: python compileall backend/src
+        entry: bash -c 'cd backend && uv run python -m compileall -q src'
+        language: system
+        pass_filenames: false
+        files: ^backend/src/
+
+      - id: backend-import-smoke
+        name: import src.api.main (backend startup smoke)
+        entry: bash -c 'cd backend && uv run python -c "from src.api.main import app"'
+        language: system
+        pass_filenames: false
+        files: ^backend/src/
+
+      - id: frontend-tsc
+        name: tsc --noEmit (frontend)
+        entry: bash -c 'cd frontend && npm run typecheck'
+        language: system
+        pass_filenames: false
+        files: ^frontend/

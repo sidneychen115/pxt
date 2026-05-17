@@ -1,6 +1,14 @@
+# PXT stack: API (backend) and backtest-worker are separate processes.
+# Use `pxt-build -a` or `docker compose up -d --build` to start all services.
+
+x-backend-build: &backend_build
+  context: ..
+  dockerfile: docker/Dockerfile.backend
+
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: pxt
       POSTGRES_USER: cx_user
@@ -17,9 +25,8 @@ services:
       retries: 5
 
   backend:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.backend
+    build: *backend_build
+    restart: unless-stopped
     env_file: ../.env
     environment:
       # Overrides .env for in-container networking (localhost in .env is wrong inside the container)
@@ -31,8 +38,31 @@ services:
       - "8000:8000"
     volumes:
       - ../schwab_token.json:/app/schwab_token.json:ro
-      # Alembic revisions live on the host — `compose run backend alembic` (e.g. pxt-rebuild -d)
+      # Alembic revisions live on the host — `pxt-build -d` / compose run backend alembic
       # must see new files without rebuilding the image after every migration.
+      - ../backend/alembic:/app/alembic:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Claims ``queued`` backtests from Postgres; API never runs the engine.
+  # Parallelism: BACKTEST_WORKER_MAX_CONCURRENT per container × replica count, e.g.
+  #   MAX_CONCURRENT=2 and `docker compose up -d --scale backtest-worker=2` → up to 4 at once.
+  # Scale: BACKTEST_WORKER_SCALE in .env or `pxt-build -w` / `-a` (see scripts/pxt-build.sh).
+  backtest-worker:
+    build: *backend_build
+    restart: unless-stopped
+    env_file: ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://cx_user:cx_pass@postgres:5432/pxt
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # Async jobs per container (default 1). Heavy 15m / large universes: keep 1–2.
+      BACKTEST_WORKER_MAX_CONCURRENT: "${BACKTEST_WORKER_MAX_CONCURRENT:-1}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["/app/.venv/bin/python", "-m", "src.backtesting.worker"]
+    volumes:
+      - ../schwab_token.json:/app/schwab_token.json:ro
       - ../backend/alembic:/app/alembic:ro
     depends_on:
       postgres:
@@ -42,6 +72,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.frontend
+    restart: unless-stopped
     # Maps host port 3000 → container :80 for all interfaces (default). Other devices on the
     # same Wi‑Fi: http://<this machine’s LAN IPv4>:3000 — ensure the host OS firewall allows TCP 3000.
     ports:

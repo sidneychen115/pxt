@@ -1,22 +1,81 @@
 import asyncio
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from functools import partial
 import pandas as pd
 import yfinance as yf
-from src.core.app_timezone import daily_bar_timestamp_for_session_date, session_date_from_utc_naive_daily_label
+from src.backtesting.intraday_limits import (
+    YFINANCE_SHORT_INTRADAY_CHUNK_DAYS,
+    intraday_yfinance_usable_earliest_date,
+)
+from src.core.app_timezone import app_zone, daily_bar_timestamp_for_session_date, session_date_from_utc_naive_daily_label
 from src.data.providers.base import DataProvider, YFINANCE_INTERVALS
 
 # Bars from Yahoo keyed by calendar day / week-end / month-end — stored at Chicago session midnight.
 _DAILY_LIKE_TF = frozenset({"1d", "1wk", "1mo"})
+_SHORT_INTRADAY_TF = frozenset({"1m", "5m", "15m", "30m"})
+
+
+def iter_yfinance_intraday_chunks(
+    start: date,
+    end: date,
+    *,
+    chunk_days: int = YFINANCE_SHORT_INTRADAY_CHUNK_DAYS,
+) -> list[tuple[date, date]]:
+    """Split [start, end) into calendar chunks for Yahoo short-intraday downloads."""
+    if start >= end:
+        return []
+    out: list[tuple[date, date]] = []
+    cur = start
+    while cur < end:
+        nxt = min(cur + timedelta(days=chunk_days), end)
+        out.append((cur, nxt))
+        cur = nxt
+    return out
 
 
 class YFinanceProvider(DataProvider):
     """
     Runs yfinance (synchronous) in a thread pool executor.
     Limits: 1m data ≤7 days, 5m-30m ≤60 days, 1h ≤730 days, 1d+ unlimited.
+  Short intraday ranges are downloaded in multi-day chunks (Yahoo rejects long spans).
     """
 
     async def get_bars(
+        self, symbol: str, timeframe: str, start: datetime, end: datetime
+    ) -> pd.DataFrame:
+        if timeframe in _SHORT_INTRADAY_TF:
+            return await self._get_short_intraday_bars(symbol, timeframe, start, end)
+        return await self._download_bars(symbol, timeframe, start, end)
+
+    async def _get_short_intraday_bars(
+        self, symbol: str, timeframe: str, start: datetime, end: datetime
+    ) -> pd.DataFrame:
+        z = start.tzinfo or app_zone()
+        as_of = datetime.now(z).date()
+        usable = intraday_yfinance_usable_earliest_date(timeframe=timeframe, as_of=as_of)
+        start_d = max(start.date(), usable)
+        end_d = end.date()
+        if start_d >= end_d:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "vwap", "source"])
+
+        chunks = iter_yfinance_intraday_chunks(start_d, end_d)
+        if len(chunks) <= 1:
+            chunk_start = datetime.combine(start_d, datetime.min.time(), tzinfo=z)
+            return await self._download_bars(symbol, timeframe, chunk_start, end)
+
+        parts: list[pd.DataFrame] = []
+        for c0, c1 in chunks:
+            chunk_start = datetime.combine(c0, datetime.min.time(), tzinfo=z)
+            chunk_end = datetime.combine(c1, datetime.min.time(), tzinfo=z)
+            df = await self._download_bars(symbol, timeframe, chunk_start, chunk_end)
+            if not df.empty:
+                parts.append(df)
+        if not parts:
+            return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "vwap", "source"])
+        out = pd.concat(parts).sort_index()
+        return out[~out.index.duplicated(keep="last")]
+
+    async def _download_bars(
         self, symbol: str, timeframe: str, start: datetime, end: datetime
     ) -> pd.DataFrame:
         interval = YFINANCE_INTERVALS.get(timeframe, "1d")

@@ -62,7 +62,12 @@ export interface ExitPolicy {
 }
 
 /** Backtest pipeline step; null when idle or after completion. */
-export type BacktestProgressPhase = 'fetching_data' | 'engine' | 'llm_eval'
+export type BacktestProgressPhase =
+  | 'queued'
+  | 'worker'
+  | 'fetching_data'
+  | 'engine'
+  | 'llm_eval'
 
 /** Aggregated from backtest_trades: sum(pnl) and number of trade rows per symbol. */
 export interface BacktestSymbolPnlStat {
@@ -78,8 +83,8 @@ export interface Backtest {
   end_date: string
   symbols: string[]
   initial_capital: number
-  status: 'running' | 'completed' | 'failed'
-  /** Current pipeline step while status is running */
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  /** Current pipeline step while status is queued or running */
   progress_phase?: BacktestProgressPhase | null
   /** Human-readable detail, e.g. symbol (2/5) */
   progress_message?: string | null
@@ -105,6 +110,8 @@ export interface Backtest {
   llm_model: string | null
   created_at: string
   completed_at: string | null
+  /** Wall-clock seconds from created_at to completed_at (or elapsed while running). */
+  duration_seconds?: number | null
   /** Strategy parameters snapshot from when the backtest was created */
   parameters?: Record<string, unknown>
   exit_policy?: ExitPolicy | null

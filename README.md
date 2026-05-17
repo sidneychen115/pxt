@@ -119,14 +119,63 @@ cd backend
 uv run alembic upgrade head
 ```
 
-### 4. Start backend
+### 4. Start backend + backtest worker
+
+API and backtests are **fully separate**: the API only enqueues jobs; a **dedicated backtest worker** must be running or jobs stay at「已入队，等待回测 worker…」.
+
+**Terminal A — API:**
 
 ```bash
 cd backend
-uv run uvicorn src.api.main:app --reload --port 8000
+uv run uvicorn src.api.main:app --host 127.0.0.1 --port 8000 --workers 2
 ```
 
-API docs available at http://localhost:8000/docs
+**Terminal B — backtest worker (required):**
+
+```bash
+cd backend
+uv run python -m src.backtesting.worker
+```
+
+**Docker (recommended):** install CLI once, then full deploy:
+
+```bash
+./scripts/install-pxt-cli.sh   # ~/.local/bin/pxt-build + pxt-rebuild alias
+pxt-build -a                   # migrate + backend + backtest-worker + frontend
+```
+
+| Command | Scope |
+|---------|--------|
+| `pxt-build -b` | API only (signals / scheduler) |
+| `pxt-build -w` | backtest-worker only (queued backtests) |
+| `pxt-build -a` | migrate + backend + worker + frontend |
+
+API docs: http://localhost:8000/docs
+
+#### Parallel backtests
+
+Total concurrent runs ≈ **`BACKTEST_WORKER_SCALE` × `BACKTEST_WORKER_MAX_CONCURRENT`**.
+
+| Knob | Where | Meaning |
+|------|--------|---------|
+| `BACKTEST_WORKER_MAX_CONCURRENT` | `.env` | Async jobs **per** worker container (default `1`, max `8` unless you raise the cap). |
+| `BACKTEST_WORKER_SCALE` | `.env` | Number of **worker containers** (`pxt-build -w` / `-a` pass `--scale backtest-worker=N`). |
+
+Example — up to **4** backtests at once on one machine:
+
+```env
+BACKTEST_WORKER_MAX_CONCURRENT=2
+BACKTEST_WORKER_SCALE=2
+```
+
+Then `pxt-build -w`. Heavy jobs (e.g. 134 symbols × 15m) need RAM/CPU; start with `2` total, not `8`.
+
+Manual scale without rebuild:
+
+```bash
+cd docker
+docker compose up -d --scale backtest-worker=2
+```
 
 ### 5. Start frontend
 
@@ -277,17 +326,26 @@ Backtest bar stream for this strategy is **daily** (`1d`) in code regardless of 
 
 ## Docker Deployment
 
-The stack is defined in `docker/docker-compose.yml`: **PostgreSQL**, **FastAPI**, and **nginx** serving the built React app. The DB user, password, and database match the local development example (`cx_user` / `cx_pass` / `pxt`). Postgres is **not** published on the host port `5432` (so it does not conflict with a Postgres you may already run locally); the backend reaches it on the Docker network as hostname `postgres`. To expose `5432` on the host, use `docker/docker-compose.postgres.yml` or add a port mapping only when you need it.
+The stack is defined in `docker/docker-compose.yml`: **PostgreSQL**, **FastAPI (backend)**, **backtest-worker**, and **nginx** serving the React app. The DB user, password, and database match the local development example (`cx_user` / `cx_pass` / `pxt`). Postgres is published on `127.0.0.1:5432` for local tools; the backend reaches it on the Docker network as hostname `postgres`.
 
 ### Start
 
 ```bash
-cd docker
-docker compose up -d --build
+./scripts/install-pxt-cli.sh   # once: installs pxt-build to ~/.local/bin
+pxt-build -a                   # migrate + rebuild all app services
 ```
 
-- **Dashboard (browser):** http://localhost:3000 — nginx proxies `/api/` and `/ws` to the backend container.
-- **Backend (direct):** http://localhost:8000 — same API as local `uvicorn`; optional for debugging or `/docs`.
+Or manually:
+
+```bash
+cd docker
+docker compose up -d --build
+docker compose run --rm backend /app/.venv/bin/alembic upgrade head   # first time / after pull
+```
+
+- **Dashboard:** http://localhost:3000 — nginx proxies `/api/` and `/ws` to `backend`.
+- **API:** http://localhost:8000 — `/docs`.
+- **Backtests** require `backtest-worker` — verify with `docker compose ps backtest-worker` and `docker compose logs -f backtest-worker`.
 
 ### Environment in containers
 

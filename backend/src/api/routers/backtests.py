@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any
 
 
 from dateutil.relativedelta import relativedelta
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+import pandas as pd
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, desc, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -37,8 +38,22 @@ async def _merge_cached_with_yfinance(
     provider: "YFinanceProvider | None" = None,
 ) -> "pd.DataFrame":
     """Fill [start, end] using DB ``cached`` series and yfinance for head/tail gaps only."""
+    from src.data.bars_merge import (
+        db_bars_cover_range,
+        get_backtest_ohlc_memory_cache,
+        yfinance_gap_needed,
+    )
     from src.data.providers.yfinance_provider import YFinanceProvider
     from src.data.repository import save_bars
+
+    mem = get_backtest_ohlc_memory_cache()
+    mem_hit = mem.get(sym, timeframe, start, end)
+    if mem_hit is not None:
+        return mem_hit
+
+    if not cached.empty and db_bars_cover_range(cached, start, end, timeframe):
+        mem.put(sym, timeframe, start, end, cached)
+        return cached
 
     prov = provider or YFinanceProvider()
 
@@ -51,9 +66,13 @@ async def _merge_cached_with_yfinance(
         return df
 
     if cached.empty:
-        return await _fetch_and_save(start, end)
+        out = await _fetch_and_save(start, end)
+        if not out.empty:
+            mem.put(sym, timeframe, start, end, out)
+        return out
 
     parts = [cached]
+    needs_head, needs_tail = yfinance_gap_needed(cached, start, end, timeframe)
 
     ix_tz = cached.index.tz
     start_ts = _pandas_ts_aligned_to_index_tz(start, ix_tz)
@@ -61,7 +80,7 @@ async def _merge_cached_with_yfinance(
     ft = first_raw.to_pydatetime() if hasattr(first_raw, "to_pydatetime") else first_raw
     first_ts = _pandas_ts_aligned_to_index_tz(ft, ix_tz)
 
-    if first_ts > start_ts:
+    if needs_head:
         df_head = await _fetch_and_save(start_ts.to_pydatetime(), first_ts.to_pydatetime())
         if not df_head.empty:
             parts.insert(0, df_head)
@@ -71,7 +90,7 @@ async def _merge_cached_with_yfinance(
     lt = last_raw.to_pydatetime() if hasattr(last_raw, "to_pydatetime") else last_raw
     last_ts = _pandas_ts_aligned_to_index_tz(lt, ix_tz)
 
-    if last_ts < end_ts:
+    if needs_tail:
         df_tail = await _fetch_and_save(last_ts.to_pydatetime(), end_ts.to_pydatetime())
         if not df_tail.empty:
             df_tail = df_tail[df_tail.index > last_raw]
@@ -79,16 +98,26 @@ async def _merge_cached_with_yfinance(
                 parts.append(df_tail)
 
     if len(parts) == 1:
-        return parts[0]
-    return pd.concat(parts).sort_index()
+        out = parts[0]
+    else:
+        out = pd.concat(parts).sort_index()
+    if not out.empty:
+        mem.put(sym, timeframe, start, end, out)
+    return out
 
 
 if TYPE_CHECKING:
-    import pandas as pd
     from src.data.providers.yfinance_provider import YFinanceProvider
 
 router = APIRouter()
 _log = logging.getLogger(__name__)
+
+
+def _format_backtest_error(exc: BaseException) -> str:
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    return f"{type(exc).__name__}（无详细消息）"
 
 
 async def _require_backtest(
@@ -127,6 +156,17 @@ async def _pnl_aggregate_by_symbol(session: AsyncSession, backtest_id: int) -> l
 
 
 # yfinance intraday caps (see YFinanceProvider); used for validation and messages
+from src.backtesting.intraday_limits import (
+    cap_intraday_warmup_months,
+    intraday_fetch_span_days,
+    intraday_span_error_message,
+    is_intraday_timeframe,
+    no_data_fetched_hint,
+    parse_warmup_months,
+    resolve_intraday_fetch_start_date,
+    yfinance_max_days,
+)
+
 _INTRADAY_TIMEFRAMES = frozenset({"1m", "5m", "15m", "30m", "1h", "4h"})
 
 
@@ -170,10 +210,10 @@ async def list_backtests(
 @router.post("/")
 async def trigger_backtest(
     req: BacktestRequest,
-    background_tasks: BackgroundTasks,
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_session),
 ):
+    """Enqueue a backtest; the dedicated ``backtest-worker`` process executes it."""
     started = datetime.now(timezone.utc)
     bt = Backtest(
         user_id=user.id,
@@ -184,14 +224,15 @@ async def trigger_backtest(
         initial_capital=req.initial_capital,
         parameters=req.parameters,
         exit_policy=req.exit_policy.model_dump(mode="json") if req.exit_policy else None,
-        status="running",
+        status="queued",
+        progress_phase="queued",
+        progress_message="已入队，等待回测 worker…",
         progress_updated_at=started,
     )
     session.add(bt)
     await session.commit()
     await session.refresh(bt)
-    background_tasks.add_task(_run_backtest, bt.id, req)
-    return {"id": bt.id, "status": "running"}
+    return {"id": bt.id, "status": "queued"}
 
 
 @router.get("/{backtest_id}")
@@ -280,8 +321,6 @@ _DAILY_LIKE_TIMEFRAMES = frozenset({"1d", "1wk", "1mo"})
 
 def _pandas_ts_aligned_to_index_tz(ts_raw: datetime, index_tz):
     """Match bar index tz (Chicago for migrated daily caches; UTC legacy intraday)."""
-    import pandas as pd
-
     ts = pd.Timestamp(ts_raw)
     if index_tz is None:
         return ts.tz_localize(timezone.utc) if ts.tz is None else ts.tz_convert(timezone.utc)
@@ -359,10 +398,11 @@ async def get_backtest_ohlc(
         start = datetime.combine(bt.start_date, time.min, tzinfo=z)
         end = datetime.combine(bt.end_date + timedelta(days=1), time.min, tzinfo=z)
         days_span = (end - start).days
-        if days_span > 730:
+        max_days = yfinance_max_days(timeframe)
+        if days_span > max_days:
             raise HTTPException(
                 400,
-                f"yfinance intraday data ({timeframe}) is limited to about 730 days; this range is {days_span} days.",
+                f"yfinance intraday data ({timeframe}) is limited to about {max_days} days; this range is {days_span} days.",
             )
     else:
         start = daily_bar_timestamp_for_session_date(bt.start_date)
@@ -410,6 +450,32 @@ async def get_backtest_ohlc(
     return {"symbol": symbol, "timeframe": timeframe, "bars": bars}
 
 
+def _backtest_duration_seconds(bt: Backtest) -> float | None:
+    """Wall-clock seconds from enqueue (created_at) through completion or last progress."""
+    created = bt.created_at
+    if created is None:
+        return None
+    utc = timezone.utc
+    created_utc = created.replace(tzinfo=utc) if created.tzinfo is None else created.astimezone(utc)
+
+    end = bt.completed_at
+    if end is not None:
+        end_utc = end.replace(tzinfo=utc) if end.tzinfo is None else end.astimezone(utc)
+    else:
+        end_utc = None
+        if bt.status in ("running", "queued", "failed"):
+            pu = bt.progress_updated_at
+            if pu is not None:
+                end_utc = pu.replace(tzinfo=utc) if pu.tzinfo is None else pu.astimezone(utc)
+        if end_utc is None:
+            return None
+
+    sec = (end_utc - created_utc).total_seconds()
+    if sec < 0:
+        return None
+    return round(sec, 3)
+
+
 def _backtest_summary(bt: Backtest, *, include_llm: bool = True) -> dict:
     return {
         "id": bt.id, "strategy_id": bt.strategy_id,
@@ -429,6 +495,7 @@ def _backtest_summary(bt: Backtest, *, include_llm: bool = True) -> dict:
         "llm_evaluation": bt.llm_evaluation if include_llm else None,
         "llm_model": bt.llm_model,
         "created_at": api_iso(bt.created_at), "completed_at": api_iso(bt.completed_at),
+        "duration_seconds": _backtest_duration_seconds(bt),
         "parameters": bt.parameters or {},
         "exit_policy": bt.exit_policy,
         "progress_phase": bt.progress_phase,
@@ -491,6 +558,41 @@ def _engine_bar_progress(backtest_id: int):
     return on_bar
 
 
+async def _run_backtest_engine(
+    *,
+    backtest_id: int,
+    engine,
+    strategy,
+    symbols: list[str],
+    run_params: dict,
+    data: dict,
+    timeframe: str,
+    sim_start: datetime,
+    sim_end: datetime,
+) -> object:
+    """Run the bar simulation off the API event loop (CPU-heavy pandas/strategy work)."""
+    from src.backtesting.thread_runner import run_coroutine_in_worker_thread, threadsafe_progress_callback
+
+    main_loop = asyncio.get_running_loop()
+    bar_progress = threadsafe_progress_callback(
+        main_loop, _engine_bar_progress(backtest_id)
+    )
+
+    async def _engine_coro():
+        return await engine.run(
+            strategy,
+            symbols,
+            run_params,
+            data,
+            timeframe,
+            simulation_start=sim_start,
+            simulation_end=sim_end,
+            bar_progress=bar_progress,
+        )
+
+    return await run_coroutine_in_worker_thread(_engine_coro(), main_loop=main_loop)
+
+
 async def _fetch_with_cache(sym: str, timeframe: str, start: datetime, end: datetime) -> pd.DataFrame:
     """Return bars for sym in [start, end], using DB cache and filling gaps from yfinance."""
     from src.data.repository import get_bars_range, upsert_instrument
@@ -508,6 +610,7 @@ async def _fetch_with_cache(sym: str, timeframe: str, start: datetime, end: date
 async def _run_backtest(backtest_id: int, req: BacktestRequest):
     from src.backtesting.engine import BacktestEngine
     from src.backtesting.evaluator import LLMEvaluator
+    from src.backtesting.position_sizing import parse_backtest_position_pct
     from src.strategies.registry import REGISTRY, discover_strategies
     discover_strategies()
     try:
@@ -521,13 +624,21 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
             sim_end = daily_bar_timestamp_for_session_date(req.end_date)
         if sim_start > sim_end:
             raise ValueError("Invalid date range: start_date must be on or before end_date.")
-        try:
-            warmup_m = int((req.parameters or {}).get("backtest_warmup_months", 24))
-        except (TypeError, ValueError):
-            warmup_m = 24
-        warmup_m = max(0, min(warmup_m, 120))
+        warmup_m = parse_warmup_months(req.parameters, timeframe=timeframe)
+        warmup_capped = False
+        yf_max_days = yfinance_max_days(timeframe)
+        if is_intraday_timeframe(timeframe):
+            warmup_m, warmup_capped = cap_intraday_warmup_months(
+                req.start_date, req.end_date, warmup_m, timeframe=timeframe
+            )
+        yf_window_warning: str | None = None
         if timeframe in _INTRADAY_TIMEFRAMES:
-            fetch_start_date = req.start_date - relativedelta(months=warmup_m)
+            fetch_start_date, yf_window_warning = resolve_intraday_fetch_start_date(
+                req.start_date,
+                req.end_date,
+                warmup_m,
+                timeframe,
+            )
             data_start = datetime.combine(fetch_start_date, time.min, tzinfo=z)
         else:
             fetch_start_date = req.start_date - relativedelta(months=warmup_m)
@@ -536,13 +647,32 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
             data_start = sim_start
         fetch_end = sim_end
         if timeframe in _INTRADAY_TIMEFRAMES:
-            days_span = (fetch_end - data_start).days
-            if days_span > 730:
+            days_span = intraday_fetch_span_days(req.start_date, req.end_date, warmup_m)
+            if days_span > yf_max_days:
+                sim_days = (req.end_date - req.start_date).days + 1
+                if warmup_m == 0 and sim_days > yf_max_days:
+                    raise ValueError(
+                        f"yfinance intraday data ({timeframe}) is limited to about "
+                        f"{yf_max_days} days; your simulation window is "
+                        f"{sim_days} days. Shorten start_date–end_date."
+                    )
                 raise ValueError(
-                    f"yfinance intraday data ({timeframe}) is limited to about 730 days; "
-                    f"warmup+window span is {days_span} days. Shorten the backtest window or set "
-                    "parameters.backtest_warmup_months lower."
+                    intraday_span_error_message(
+                        timeframe,
+                        req.start_date,
+                        req.end_date,
+                        warmup_m,
+                        days_span,
+                    )
                 )
+        if warmup_capped:
+            await _set_backtest_progress(
+                backtest_id,
+                "fetching_data",
+                f"日内数据上限：已将 backtest_warmup_months 自动降为 {warmup_m}（yfinance {timeframe} 约 {yf_max_days} 天）",
+            )
+        if yf_window_warning:
+            await _set_backtest_progress(backtest_id, "fetching_data", yf_window_warning)
         bench_sym = _benchmark_symbol_from_params(req.parameters)
         unique_syms = list(dict.fromkeys([*req.symbols, bench_sym]))
 
@@ -566,12 +696,27 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                 session, unique_syms, timeframe, data_start, fetch_end
             )
 
+        from src.data.bars_merge import db_bars_cover_range
+
+        need_network = [
+            s
+            for s in req.symbols
+            if not db_bars_cover_range(cached_map[s], data_start, fetch_end, timeframe)
+        ]
+        if need_network:
+            await _set_backtest_progress(
+                backtest_id,
+                "fetching_data",
+                f"拉取行情: {len(need_network)}/{len(req.symbols)} 标的需补 Yahoo 缺口…",
+            )
+        else:
+            await _set_backtest_progress(
+                backtest_id,
+                "fetching_data",
+                f"拉取行情: {len(req.symbols)} 标的已命中库缓存，跳过 Yahoo…",
+            )
+
         provider = YFinanceProvider()
-        await _set_backtest_progress(
-            backtest_id,
-            "fetching_data",
-            "拉取行情: 补全缺口（标的 + 基准并行请求）…",
-        )
 
         async def _fill_one(sym: str):
             return await _merge_cached_with_yfinance(
@@ -590,10 +735,11 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
             if not df.empty:
                 data[sym] = {timeframe: df}
         if not data:
+            extra = no_data_fetched_hint(timeframe) if is_intraday_timeframe(timeframe) else ""
             raise ValueError(
                 f"No data fetched for any symbol (timeframe={timeframe}, "
                 f"{req.start_date}–{req.end_date}). "
-                "Check symbols, network, and for 1h/lower TFs keep the range within ~730 days."
+                f"Check symbols and network.{extra}"
             )
         if bench_sym not in data:
             df_bench = await _fill_one(bench_sym)
@@ -601,32 +747,37 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
                 data[bench_sym] = {timeframe: df_bench}
         await _set_backtest_progress(backtest_id, "engine", "回测引擎计算中…")
         strategy = REGISTRY[req.strategy_id]()
-        run_params = dict(req.parameters)
+        run_params = dict(req.parameters or {})
         run_params.setdefault("timeframe", timeframe)
+        run_params["backtest_warmup_months"] = warmup_m
         bt_fill = run_params.get("backtest_fill_mode")
         if bt_fill in (None, ""):
             bt_fill = getattr(type(strategy), "backtest_fill_mode", "next_open")
         fill_mode = str(bt_fill).strip()
         if fill_mode not in ("next_open", "same_close"):
             fill_mode = "next_open"
+        position_pct = parse_backtest_position_pct(run_params)
+        run_params["backtest_position_pct"] = position_pct
         engine = BacktestEngine(
             initial_capital=req.initial_capital,
             exit_policy=req.exit_policy,
             fill_mode=fill_mode,
+            position_pct=position_pct,
         )
         if req.exit_policy is not None:
             run_params.setdefault(
                 "entry_price_check_mode", req.exit_policy.entry_price_check_mode
             )
-        metrics = await engine.run(
-            strategy,
-            req.symbols,
-            run_params,
-            data,
-            timeframe,
-            simulation_start=sim_start,
-            simulation_end=sim_end,
-            bar_progress=_engine_bar_progress(backtest_id),
+        metrics = await _run_backtest_engine(
+            backtest_id=backtest_id,
+            engine=engine,
+            strategy=strategy,
+            symbols=req.symbols,
+            run_params=run_params,
+            data=data,
+            timeframe=timeframe,
+            sim_start=sim_start,
+            sim_end=sim_end,
         )
         from src.backtesting.benchmark import enrich_metrics_with_benchmark
 
@@ -689,14 +840,17 @@ async def _run_backtest(backtest_id: int, req: BacktestRequest):
         )
     except Exception as e:
         _log.exception("Backtest %d failed", backtest_id)
+        fail_msg = _format_backtest_error(e)
+        now = datetime.now(timezone.utc)
         async with async_session_factory() as session:
             await session.execute(
                 update(Backtest).where(Backtest.id == backtest_id).values(
                     status="failed",
-                    error_message=str(e),
+                    error_message=fail_msg,
                     progress_phase=None,
                     progress_message=None,
                     progress_updated_at=None,
+                    completed_at=now,
                 )
             )
             await session.commit()

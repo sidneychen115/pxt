@@ -28,6 +28,22 @@ export function formatAppDateTime(iso: string | null | undefined): string {
   })
 }
 
+/** Human-readable wall-clock duration for backtest list (seconds). */
+export function formatDurationSeconds(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return '—'
+  const s = Math.round(seconds)
+  if (s < 60) return `${s}秒`
+  const m = Math.floor(s / 60)
+  const rem = s % 60
+  if (m < 60) return rem > 0 ? `${m}分${rem}秒` : `${m}分`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  if (h < 24) return rm > 0 ? `${h}时${rm}分` : `${h}时`
+  const d = Math.floor(h / 24)
+  const rh = h % 24
+  return rh > 0 ? `${d}天${rh}时` : `${d}天`
+}
+
 export function formatAppDateOnly(iso: string | null | undefined): string {
   if (iso == null || iso === '') return '—'
   const d = new Date(iso)

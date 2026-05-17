@@ -1,8 +1,13 @@
-"""MVP Chan-style signals on regular daily OHLC: 分型 + 笔 + 简化中枢 (optional SMA)."""
+"""MVP Chan-style signals on regular OHLC bars (15m / 1h / 1d): 分型 + 笔 + 简化中枢 (optional SMA)."""
 
 from __future__ import annotations
 
 from src.strategies.base import BaseStrategy, DataContext, PortfolioSnapshot, TradeSignal
+from src.strategies.chan_mvp_params import (
+    DEFAULT_CHAN_MVP_TIMEFRAME,
+    chan_mvp_default_parameters,
+    resolve_chan_mvp_params,
+)
 from src.strategies.chan_structure import mvp_chan_signal_at_last_bar
 
 
@@ -10,30 +15,17 @@ class ChanBiFractalMvpStrategy(BaseStrategy):
     """分型 + 笔 + 中枢；买默认须站上 ZG；卖默认仅需顶分型+向上笔（可选再加破 ZD）。"""
 
     id = "chan_bi_fractal_mvp"
-    name = "Chan MVP: 分型 + 笔 + 中枢 (daily OHLC)"
+    name = "Chan MVP: 分型 + 笔 + 中枢 (15m / 1h / 日线)"
     description = (
-        "Regular daily bars: inclusion merge, 分型, 笔 (min_fractal_sep), 最近 N 笔价位区间的重叠带作为简化中枢 "
-        "[ZD,ZG]。买：确认底分型 + 向下笔止于该底 + 可选收盘 > ZG + 可选 SMA；"
-        "卖：顶分型 + 向上笔终点；有重叠中枢时可附加收盘与 ZD 关系。最近三笔无价位重叠时买卖均退化为分型+笔（与中枢逻辑对称）。"
+        "Regular OHLC bars (default 1h; parameters.timeframe: 15m, 1h, or 1d). "
+        "Inclusion merge, 分型, 笔 (min_fractal_sep), simplified 中枢 [ZD,ZG] from overlapping strokes. "
+        "Buy: confirmed bottom fractal + downward stroke ending at bottom + optional close > ZG + optional SMA; "
+        "sell: top fractal + upward stroke end; optional close vs ZD. Not full Chan theory."
     )
     default_symbols = ["SPY"]
-    default_timeframes = ["1d"]
-    default_frequency = "0 16 * * 1-5"
-    default_parameters = {
-        "timeframe": "1d",
-        "sma_period": 20,
-        "use_sma_filter": False,
-        "bar_limit": 320,
-        "min_fractal_sep": 4,
-        "use_bi_filter": True,
-        "use_zhongshu_filter": True,
-        "zhongshu_stroke_count": 3,
-        "buy_close_above_zg": True,
-        "sell_close_below_zd": False,
-    }
-
-    def _params(self, parameters: dict) -> dict:
-        return {**self.default_parameters, **parameters}
+    default_timeframes = ["15m", "1h", "1d"]
+    default_frequency = "60m"
+    default_parameters = chan_mvp_default_parameters(DEFAULT_CHAN_MVP_TIMEFRAME)
 
     async def generate_signals(
         self,
@@ -42,18 +34,18 @@ class ChanBiFractalMvpStrategy(BaseStrategy):
         ctx: DataContext,
         portfolio: PortfolioSnapshot | None = None,
     ) -> list[TradeSignal]:
-        p = self._params(parameters)
-        tf = str(p.get("timeframe", "1d"))
-        sma_n = int(p.get("sma_period", 20))
-        use_sma = bool(p.get("use_sma_filter", False))
-        limit = int(p.get("bar_limit", 320))
+        p = resolve_chan_mvp_params(parameters)
+        tf = str(p["timeframe"])
+        sma_n = int(p["sma_period"])
+        use_sma = bool(p["use_sma_filter"])
+        limit = int(p["bar_limit"])
         limit = max(limit, sma_n + 40, 120)
-        min_sep = int(p.get("min_fractal_sep", 4))
-        use_bi = bool(p.get("use_bi_filter", True))
-        use_zs = bool(p.get("use_zhongshu_filter", True))
-        n_zs = int(p.get("zhongshu_stroke_count", 3))
-        buy_zg = bool(p.get("buy_close_above_zg", True))
-        sell_zd = bool(p.get("sell_close_below_zd", False))
+        min_sep = int(p["min_fractal_sep"])
+        use_bi = bool(p["use_bi_filter"])
+        use_zs = bool(p["use_zhongshu_filter"])
+        n_zs = int(p["zhongshu_stroke_count"])
+        buy_zg = bool(p["buy_close_above_zg"])
+        sell_zd = bool(p["sell_close_below_zd"])
 
         bar_t = await ctx.decision_time()
         if getattr(self, "_chan_mvp_bar_utc", None) != bar_t:

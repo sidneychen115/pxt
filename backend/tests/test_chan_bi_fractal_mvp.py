@@ -83,6 +83,19 @@ async def test_chan_mvp_no_signal_when_flat(strategy):
     assert signals == []
 
 
+async def test_chan_mvp_1h_uses_hourly_bars(strategy):
+    df = _trending_bars_with_bottom_confirm()
+    df.index = pd.date_range("2023-01-01", periods=len(df), freq="h", tz="UTC")
+    ctx = MockDataContext(df)
+    signals = await strategy.generate_signals(
+        ["SPY"],
+        {"timeframe": "1h", "use_sma_filter": False, "bar_limit": 300},
+        ctx,
+    )
+    assert len(signals) == 1
+    assert signals[0].direction == "buy"
+
+
 async def test_chan_mvp_caches_fractal_per_bar_rounds(strategy, monkeypatch):
     """Same simulated bar + multiple generate_signals calls should not recompute merge/fractals."""
     calls = {"n": 0}
@@ -93,7 +106,7 @@ async def test_chan_mvp_caches_fractal_per_bar_rounds(strategy, monkeypatch):
         calls["n"] += 1
         return real_mvp(*args, **kwargs)
 
-    monkeypatch.setattr(stratmod, "mvp_fractal_signal_at_last_bar", counting_mvp)
+    monkeypatch.setattr(stratmod, "mvp_chan_signal_at_last_bar", counting_mvp)
 
     df = _trending_bars_with_bottom_confirm()
     ts = df.index[-1]

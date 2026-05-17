@@ -31,41 +31,91 @@ async def run_backtest_stale_reaper(*, interval_sec: float = 45.0) -> None:
             log.exception("backtest stale reaper tick failed")
 
 
+def queued_stale_after() -> timedelta:
+    """Queued jobs wait for a worker slot; use a much longer timeout than ``running``."""
+    sec = int(os.environ.get("BACKTEST_QUEUED_STALE_AFTER_SECONDS", "86400"))
+    return timedelta(seconds=max(600, sec))
+
+
 async def _reap_once() -> None:
-    cutoff = datetime.now(timezone.utc) - stale_after()
-    msg = (
+    now = datetime.now(timezone.utc)
+    running_cutoff = now - stale_after()
+    running_msg = (
         f"运行任务超过 {int(stale_after().total_seconds())} 秒未上报进度，"
         "可能进程已退出、服务已重启或任务被中断。"
     )
+    queued_cutoff = now - queued_stale_after()
+    queued_msg = (
+        f"排队超过 {int(queued_stale_after().total_seconds())} 秒仍未开始；"
+        "请确认 backtest-worker 进程/容器已启动。"
+    )
     async with async_session_factory() as session:
-        result = await session.execute(
-            select(Backtest.id).where(
-                Backtest.status == "running",
-                or_(
-                    (Backtest.progress_updated_at.is_not(None))
-                    & (Backtest.progress_updated_at < cutoff),
-                    Backtest.progress_updated_at.is_(None) & (Backtest.created_at < cutoff),
-                ),
-            )
-        )
-        ids = [row[0] for row in result.all()]
-        if not ids:
+        running_ids = [
+            row[0]
+            for row in (
+                await session.execute(
+                    select(Backtest.id).where(
+                        Backtest.status == "running",
+                        or_(
+                            (Backtest.progress_updated_at.is_not(None))
+                            & (Backtest.progress_updated_at < running_cutoff),
+                            Backtest.progress_updated_at.is_(None)
+                            & (Backtest.created_at < running_cutoff),
+                        ),
+                    )
+                )
+            ).all()
+        ]
+        queued_ids = [
+            row[0]
+            for row in (
+                await session.execute(
+                    select(Backtest.id).where(
+                        Backtest.status == "queued",
+                        or_(
+                            (Backtest.progress_updated_at.is_not(None))
+                            & (Backtest.progress_updated_at < queued_cutoff),
+                            Backtest.progress_updated_at.is_(None)
+                            & (Backtest.created_at < queued_cutoff),
+                        ),
+                    )
+                )
+            ).all()
+        ]
+        if not running_ids and not queued_ids:
             return
-        now = datetime.now(timezone.utc)
-        await session.execute(
-            update(Backtest)
-            .where(Backtest.id.in_(ids))
-            .values(
-                status="failed",
-                error_message=msg,
-                progress_phase=None,
-                progress_message=None,
-                progress_updated_at=None,
-                completed_at=now,
+
+        if running_ids:
+            await session.execute(
+                update(Backtest)
+                .where(Backtest.id.in_(running_ids))
+                .values(
+                    status="failed",
+                    error_message=running_msg,
+                    progress_phase=None,
+                    progress_message=None,
+                    progress_updated_at=None,
+                    completed_at=now,
+                )
             )
-        )
+        if queued_ids:
+            await session.execute(
+                update(Backtest)
+                .where(Backtest.id.in_(queued_ids))
+                .values(
+                    status="failed",
+                    error_message=queued_msg,
+                    progress_phase=None,
+                    progress_message=None,
+                    progress_updated_at=None,
+                    completed_at=now,
+                )
+            )
         await session.commit()
 
+    ids = [*running_ids, *queued_ids]
+    if not ids:
+        return
     for bid in ids:
         await ws_manager.broadcast(
             "backtest_progress",
@@ -76,4 +126,4 @@ async def _reap_once() -> None:
                 "status": "failed",
             },
         )
-    log.warning("Marked %d stale running backtest(s) as failed: %s", len(ids), ids)
+    log.warning("Marked %d stale backtest(s) as failed: %s", len(ids), ids)

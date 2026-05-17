@@ -52,6 +52,10 @@ from src.strategies.base import BaseStrategy, PortfolioSnapshot, TradeSignal
 from src.backtesting.data_context import BacktestDataContext
 from src.backtesting.exit_policy import ExitPolicy
 from src.backtesting.metrics import BacktestMetrics, TradeRecord
+from src.backtesting.position_sizing import (
+    DEFAULT_BACKTEST_POSITION_PCT,
+    buy_quantity_for_signal,
+)
 
 
 @dataclass
@@ -72,9 +76,11 @@ class BacktestEngine:
         initial_capital: float = 100_000.0,
         exit_policy: ExitPolicy | None = None,
         fill_mode: str = "next_open",
+        position_pct: float = DEFAULT_BACKTEST_POSITION_PCT,
     ):
         self._capital = initial_capital
         self._exit_policy = exit_policy
+        self._position_pct = max(0.0, min(1.0, float(position_pct)))
         if fill_mode not in ("next_open", "same_close"):
             raise ValueError("fill_mode must be 'next_open' or 'same_close'")
         self._fill_mode = fill_mode
@@ -113,12 +119,14 @@ class BacktestEngine:
             fill_time = future.index[0]
 
         if sig.direction == "buy" and sym not in positions:
-            if sig.quantity is not None:
-                qty = float(sig.quantity)
-                if qty <= 0:
-                    return False, cash
-            else:
-                qty = float(max(1, int(cash * 0.1 / fill_price)))
+            qty = buy_quantity_for_signal(
+                cash=cash,
+                fill_price=fill_price,
+                position_pct=self._position_pct,
+                signal_quantity=sig.quantity,
+            )
+            if qty <= 0:
+                return False, cash
             cost = qty * fill_price
             if cost <= cash:
                 new_cash = cash - cost
